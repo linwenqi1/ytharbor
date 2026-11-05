@@ -1,6 +1,7 @@
 node_modules/
 dist/
 src-tauri/target/
+src-tauri/gen/schemas/
 src-tauri/binaries/yt-dlp*
 src-tauri/resources/ffmpeg/*
 src-tauri/resources/deno/*

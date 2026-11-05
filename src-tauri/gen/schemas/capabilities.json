@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"YtHarbor main window permissions","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open"]}}

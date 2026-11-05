@@ -30,6 +30,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "icon": ["icons/icon.ico"],
     "externalBin": ["binaries/yt-dlp"],
     "resources": ["resources/ffmpeg/*", "resources/deno/*"],
     "windows": {
