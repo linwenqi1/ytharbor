@@ -68,7 +68,7 @@ pub fn parse(app: &AppHandle, url: &str) -> Result<VideoMetadata, String> {
         id: raw.id.unwrap_or_default(), url: raw.webpage_url.unwrap_or_else(|| url.to_owned()), platform,
         title: raw.title.unwrap_or_else(|| "未命名视频".to_owned()),
         author: raw.uploader.or(raw.channel).unwrap_or_default(), duration: raw.duration,
-        thumbnail: raw.thumbnail, formats,
+        thumbnail: raw.thumbnail.map(|url| url.replacen("http://", "https://", 1)), formats,
     })
 }
 

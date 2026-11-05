@@ -14,11 +14,13 @@ export function DownloadTask({ task, onCancel }: { task: Task; onCancel?: (id: s
   const active = ["pending", "downloading", "processing"].includes(task.status);
   const detail = task.status === "downloading"
     ? [speed(task.speed), task.eta != null ? `剩余 ${task.eta} 秒` : null].filter(Boolean).join(" · ")
-    : task.status === "processing" ? "正在合并或转换媒体文件…" : task.error || task.outputPath || task.formatLabel;
+    : task.status === "processing" ? "正在合并或转换媒体文件…"
+    : task.status === "completed" ? `${task.formatLabel} · 已保存到下载目录`
+    : task.error || task.formatLabel;
   return (
     <article className="task-card">
       <div className="task-thumb">
-        {task.thumbnail ? <img src={task.thumbnail} alt="" /> : <Icon name={task.kind === "video" ? "video" : "music"} size={23} />}
+        {task.thumbnail ? <img src={task.thumbnail.replace(/^http:/, "https:")} referrerPolicy="no-referrer" alt="" /> : <Icon name={task.kind === "video" ? "video" : "music"} size={23} />}
       </div>
       <div className="task-main">
         <div className="task-title"><strong title={task.title}>{task.title}</strong><span className={`task-status ${task.status}`}>{task.status === "completed" && <Icon name="check" size={13} />}{labels[task.status]}</span></div>

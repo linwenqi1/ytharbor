@@ -33,7 +33,7 @@ export function VideoPreview(props: Props) {
     <section className="preview-card fade-in">
       <div className="video-summary">
         <div className="thumbnail">
-          {props.video.thumbnail ? <img src={props.video.thumbnail} alt="" /> : <div className="thumb-placeholder"><Icon name="video" size={30} /></div>}
+          {props.video.thumbnail ? <img src={props.video.thumbnail.replace(/^http:/, "https:")} referrerPolicy="no-referrer" alt="" /> : <div className="thumb-placeholder"><Icon name="video" size={30} /></div>}
           <span>{duration(props.video.duration)}</span>
         </div>
         <div className="video-copy">
