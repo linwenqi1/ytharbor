@@ -48,6 +48,19 @@ npm run tauri build
 
 正式分发前请固定下载核心版本、校验 SHA-256，并按 [THIRD_PARTY.md](./THIRD_PARTY.md) 补齐许可证材料。YouTube 的提取能力会随站点变化，发布测试应持续覆盖 yt-dlp + EJS + Deno 组合。
 
+## 自动发布 Windows 安装包
+
+推送任意 Git Tag 会触发 `.github/workflows/release.yml`：GitHub Actions 会在 Windows runner 上准备下载核心、构建 MSI 和 NSIS `-setup.exe`，并将这两个文件上传到同名 GitHub Release。
+
+发布前请先把项目版本更新为要发布的版本（`package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json`），然后推送 Tag，例如：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+正式构建的应用使用 Windows GUI 子系统，因此从安装包或快捷方式启动时不会额外弹出黑色终端窗口；`npm run tauri dev` 仍保留开发控制台。
+
 ## 结构
 
 ```text

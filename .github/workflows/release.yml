@@ -1,0 +1,58 @@
+name: Publish Windows release
+
+on:
+  push:
+    tags:
+      - "*"
+
+# Avoid two runs trying to create or update the same GitHub Release.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish-windows:
+    name: Build and publish Windows installers
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # The application bundles these binaries so end users do not need to
+      # install yt-dlp, FFmpeg, or Deno separately.
+      - name: Prepare bundled download tools
+        shell: pwsh
+        run: ./scripts/prepare-windows.ps1 -Target x86_64-pc-windows-msvc
+
+      - name: Build installers and publish the matching GitHub Release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: YtHarbor ${{ github.ref_name }}
+          releaseBody: Download the Windows installer for this release below.
+          releaseDraft: false
+          prerelease: false
+          args: --bundles msi,nsis
