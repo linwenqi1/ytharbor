@@ -14,7 +14,7 @@ export interface FormatOption {
 export interface VideoMetadata {
   id: string;
   url: string;
-  platform: "YouTube" | "Bilibili";
+  platform: "YouTube" | "Bilibili" | "Douyin" | "TikTok";
   title: string;
   author: string;
   duration: number | null;

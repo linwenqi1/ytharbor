@@ -1,6 +1,6 @@
 # YtHarbor
 
-轻量、本地优先的桌面视频下载器。基于 Tauri 2、React、Rust、yt-dlp 与 FFmpeg，当前只接受 YouTube 和 Bilibili 单视频链接。
+轻量、本地优先的桌面视频下载器。基于 Tauri 2、React、Rust、yt-dlp 与 FFmpeg，当前支持 YouTube、Bilibili、抖音和 TikTok 单视频链接。
 
 ## 已实现
 
@@ -10,6 +10,8 @@
 - 单任务串行队列、实时进度、速度、ETA、后处理状态和取消
 - 本地设置与最近 200 条历史记录（JSON，无数据库）
 - URL 平台白名单、参数数组调用、文件名模板路径校验
+- YouTube、Bilibili 与 TikTok 单视频解析与下载（yt-dlp）
+- 抖音公开单视频原生解析与无水印播放流下载；仅使用应用本次运行的匿名访客会话，不读取浏览器 Cookie
 - Windows sidecar / FFmpeg / Deno 资源打包配置（完整 YouTube 提取链路）
 
 播放列表、Cookie、代理、字幕和核心在线更新有意留到后续版本，当前范围保持简单。

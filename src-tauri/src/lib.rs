@@ -1,4 +1,5 @@
 mod commands;
+mod douyin;
 mod downloader;
 mod metadata;
 mod models;

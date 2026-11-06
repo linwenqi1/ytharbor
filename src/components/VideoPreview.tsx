@@ -29,6 +29,7 @@ interface Props {
 export function VideoPreview(props: Props) {
   const formats = props.video.formats.filter((format) => format.kind === props.kind);
   const selected = formats.find((format) => format.id === props.formatId) ?? formats[0];
+  const supportsAudio = props.video.formats.some((format) => format.kind === "audio");
   return (
     <section className="preview-card fade-in">
       <div className="video-summary">
@@ -49,7 +50,7 @@ export function VideoPreview(props: Props) {
           <label className="section-label">下载类型</label>
           <div className="segmented">
             <button className={props.kind === "video" ? "selected" : ""} onClick={() => props.onKindChange("video")}><Icon name="video" size={17} />视频</button>
-            <button className={props.kind === "audio" ? "selected" : ""} onClick={() => props.onKindChange("audio")}><Icon name="music" size={17} />仅音频</button>
+            {supportsAudio && <button className={props.kind === "audio" ? "selected" : ""} onClick={() => props.onKindChange("audio")}><Icon name="music" size={17} />仅音频</button>}
           </div>
         </div>
         <div>
