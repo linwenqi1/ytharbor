@@ -37,7 +37,7 @@ main { height: 100vh; overflow-y: auto; }
 .page { width: min(920px, calc(100% - 72px)); margin: 0 auto; padding: 58px 0 70px; }
 .narrow-page { width: min(800px, calc(100% - 72px)); }
 .page-header { margin-bottom: 30px; }.page-header h1 { margin: 5px 0 6px; color: var(--ink); font-size: 32px; letter-spacing: -.8px; line-height: 1.2; }.page-header p { margin: 0; color: var(--muted); font-size: 14px; }
-.hero-header { margin-bottom: 27px; }.hero-header h1 { margin: 8px 0 10px; font-size: clamp(38px, 5vw, 56px); line-height: 1.08; letter-spacing: -2.7px; font-weight: 650; }.hero-header h1 em { color: var(--sea); font-style: normal; }.hero-header p { font-size: 15px; }
+.hero-header { margin-bottom: 27px; }.hero-header h1 { margin: 9px 0 11px; font-size: clamp(34px, 4.2vw, 46px); line-height: 1.22; letter-spacing: -.4px; font-weight: 650; }.hero-header h1 em { color: var(--sea); font-style: normal; }.hero-header p { font-size: 15px; }
 .eyebrow { color: #b47d51; font-size: 10px; letter-spacing: 2.2px; font-weight: 700; }
 .split-header { display: flex; align-items: flex-end; justify-content: space-between; }
 
