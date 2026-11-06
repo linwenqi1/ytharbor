@@ -38,7 +38,7 @@ pub fn validate_url(value: &str) -> Result<String, String> {
 
 pub fn parse(app: &AppHandle, url: &str) -> Result<VideoMetadata, String> {
     let platform = validate_url(url)?;
-    let mut command = Command::new(yt_dlp_binary(app));
+    let mut command = yt_dlp_command(app);
     command.args(["--dump-single-json", "--no-playlist", "--skip-download", "--no-warnings"]);
     if let Some(runtime) = deno_binary(app) {
         command.arg("--js-runtimes").arg(format!("deno:{}", runtime.to_string_lossy()));
@@ -85,6 +85,27 @@ pub fn yt_dlp_binary(app: &AppHandle) -> OsString {
         candidates.push(source_dir.join(source_name));
     }
     candidates.into_iter().find(|path| path.is_file()).map(Into::into).unwrap_or_else(|| OsString::from(exe))
+}
+
+/// Creates a yt-dlp process without a visible console window on Windows.
+///
+/// yt-dlp is a console executable. A GUI-subsystem Tauri app would otherwise
+/// cause Windows to create a new terminal each time it parses or downloads.
+pub fn yt_dlp_command(app: &AppHandle) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = Command::new(yt_dlp_binary(app));
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        Command::new(yt_dlp_binary(app))
+    }
 }
 
 fn current_target_triple() -> Option<String> {

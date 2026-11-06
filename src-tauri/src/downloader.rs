@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fs,
     io::{BufRead, BufReader},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -108,7 +108,7 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
     if let Some(runtime) = metadata::deno_binary(app) { args.extend(["--js-runtimes".to_owned(), format!("deno:{}", runtime.to_string_lossy())]); }
     args.extend(["--".to_owned(), item.request.url.clone()]);
 
-    let spawned = Command::new(metadata::yt_dlp_binary(app)).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+    let spawned = metadata::yt_dlp_command(app).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {

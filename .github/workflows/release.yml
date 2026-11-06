@@ -52,7 +52,16 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: YtHarbor ${{ github.ref_name }}
-          releaseBody: Download the Windows installer for this release below.
+          releaseBody: |
+            ## Windows installers
+
+            - `.msi`: suitable for managed or Windows Installer deployments.
+            - `-setup.exe`: recommended for most users; run the installer to get started.
+
+            ## Changelog
+
+            GitHub automatically generates the changelog below from changes since the previous release.
           releaseDraft: false
           prerelease: false
+          generateReleaseNotes: true
           args: --bundles msi,nsis
