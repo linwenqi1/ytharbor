@@ -6,7 +6,7 @@ use crate::{
 use std::{
     collections::{HashMap, VecDeque},
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -245,12 +245,13 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
-            if let Some(handle) = out_thread.take() {
-                let _ = handle.join();
-            }
-            if let Some(handle) = err_thread.take() {
-                let _ = handle.join();
-            }
+            // Do not synchronously join the pipe readers here. A network or
+            // child-process failure can leave an inherited pipe open, which
+            // used to delay the visible cancellation indefinitely. Dropping
+            // the handles detaches these short-lived readers; they exit once
+            // their pipes close and can no longer mutate task state.
+            drop(out_thread.take());
+            drop(err_thread.take());
             finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
             cleanup(inner, &item.id);
             return;
@@ -334,7 +335,7 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
 
     // Resolve immediately before opening the stream. This produces a fresh
     // signed CDN URL instead of persisting a short-lived URL in task history.
-    let mut download = match douyin::open_download(&item.request.url, &item.request.format_id) {
+    let download = match douyin::open_download(&item.request.url, &item.request.format_id) {
         Ok(download) => download,
         Err(error) => {
             finish_task(app, inner, &item.id, TaskStatus::Failed, None, Some(error));
@@ -382,55 +383,28 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
     let started = Instant::now();
     let mut last_update = Instant::now() - Duration::from_secs(1);
     let mut written = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-
-    loop {
+    let stream_result = douyin::stream_download(&download, |chunk| {
         if cancel.load(Ordering::Relaxed) {
-            drop(file);
-            let _ = fs::remove_file(&partial_path);
-            finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
-            cleanup(inner, &item.id);
-            return;
+            return Err("下载已取消".to_owned());
         }
-        let read = match download.response.read(&mut buffer) {
-            Ok(read) => read,
-            Err(error) => {
-                drop(file);
-                let _ = fs::remove_file(&partial_path);
-                finish_task(
-                    app,
-                    inner,
-                    &item.id,
-                    TaskStatus::Failed,
-                    None,
-                    Some(format!("抖音媒体下载中断：{error}")),
-                );
-                cleanup(inner, &item.id);
-                return;
-            }
-        };
-        if read == 0 {
-            break;
-        }
-        if let Err(error) = file.write_all(&buffer[..read]) {
-            drop(file);
-            let _ = fs::remove_file(&partial_path);
-            finish_task(
-                app,
-                inner,
-                &item.id,
-                TaskStatus::Failed,
-                None,
-                Some(format!("无法写入下载文件：{error}")),
-            );
-            cleanup(inner, &item.id);
-            return;
-        }
-        written += read as u64;
+        file.write_all(chunk).map_err(|error| format!("无法写入下载文件：{error}"))?;
+        written += chunk.len() as u64;
         if last_update.elapsed() >= Duration::from_millis(180) {
             update_native_progress(app, inner, &item.id, written, total, started.elapsed());
             last_update = Instant::now();
         }
+        Ok(())
+    });
+    if let Err(error) = stream_result {
+        drop(file);
+        let _ = fs::remove_file(&partial_path);
+        if cancel.load(Ordering::Relaxed) {
+            finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
+        } else {
+            finish_task(app, inner, &item.id, TaskStatus::Failed, None, Some(error));
+        }
+        cleanup(inner, &item.id);
+        return;
     }
     if cancel.load(Ordering::Relaxed) {
         drop(file);

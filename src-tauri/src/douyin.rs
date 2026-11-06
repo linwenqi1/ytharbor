@@ -42,7 +42,7 @@ struct ResolvedVideo {
 
 /// An open direct media response. The caller owns streaming it to disk.
 pub struct MediaDownload {
-    pub response: Response,
+    media_url: String,
     pub total_bytes: Option<u64>,
     pub id: String,
 }
@@ -74,10 +74,49 @@ pub fn open_download(input: &str, format_id: &str) -> Result<MediaDownload, Stri
         ));
     }
     let total_bytes = response.content_length();
+    let media_url = response.url().to_string();
     Ok(MediaDownload {
-        response,
+        media_url,
         total_bytes,
         id: video.id,
+    })
+}
+
+/// Streams a freshly resolved CDN URL. The async client uses a per-read
+/// timeout, so a stalled connection is released without imposing a short total
+/// timeout on large videos.
+pub fn stream_download<F>(download: &MediaDownload, mut on_chunk: F) -> Result<(), String>
+where
+    F: FnMut(&[u8]) -> Result<(), String>,
+{
+    let media_url = download.media_url.clone();
+    tauri::async_runtime::block_on(async move {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(20))
+            .read_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(24 * 60 * 60))
+            .redirect(Policy::limited(8))
+            .build()
+            .map_err(|error| format!("无法初始化抖音媒体连接：{error}"))?;
+        let mut response = client
+            .get(media_url)
+            .header(USER_AGENT, USER_AGENT_VALUE)
+            .header(ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.7")
+            .header(REFERER, DOUYIN_HOME)
+            .send()
+            .await
+            .map_err(|error| format!("抖音媒体请求失败：{error}"))?;
+        if !response.status().is_success() {
+            return Err(format!("抖音媒体地址不可用（HTTP {}）", response.status()));
+        }
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| format!("抖音媒体下载中断：{error}"))?
+        {
+            on_chunk(&chunk)?;
+        }
+        Ok(())
     })
 }
 
@@ -457,7 +496,7 @@ impl AnonymousSession {
     fn new() -> Result<Self, String> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(20))
-            .timeout(None)
+            .timeout(Duration::from_secs(30))
             .redirect(Policy::limited(8))
             .build()
             .map_err(|error| format!("无法初始化抖音网络会话：{error}"))?;
@@ -504,7 +543,10 @@ impl AnonymousSession {
         if let Some(range) = range {
             request = request.header(RANGE, range);
         }
-        if !self.cookies.is_empty() {
+        // `ttwid` is an anonymous Douyin visitor cookie, but it still must not
+        // be attached to third-party/CDN requests. Reqwest also strips Cookie
+        // on cross-host redirects as a second line of defence.
+        if !self.cookies.is_empty() && is_douyin_session_host(url) {
             request = request.header(COOKIE, self.cookie_header());
         }
         let response = request
@@ -559,9 +601,20 @@ impl AnonymousSession {
     }
 }
 
+fn is_douyin_session_host(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    host == "douyin.com"
+        || host.ends_with(".douyin.com")
+        || host == "iesdouyin.com"
+        || host.ends_with(".iesdouyin.com")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{extract_aweme_id, playback_url};
+    use super::{extract_aweme_id, is_douyin_session_host, playback_url};
 
     #[test]
     fn extracts_ids_from_supported_share_forms() {
@@ -588,6 +641,14 @@ mod tests {
     }
 
     #[test]
+    fn only_sends_the_visitor_cookie_to_douyin_hosts() {
+        assert!(is_douyin_session_host("https://www.douyin.com/video/123"));
+        assert!(is_douyin_session_host("https://www.iesdouyin.com/share/video/123/"));
+        assert!(!is_douyin_session_host("https://aweme.snssdk.com/aweme/v1/play/"));
+        assert!(!is_douyin_session_host("https://v1-cold.douyinvod.com/video.mp4"));
+    }
+
+    #[test]
     #[ignore = "requires a live public Douyin video supplied through YTHARBOR_DOUYIN_TEST_URL"]
     fn resolves_a_live_public_video() {
         let url = std::env::var("YTHARBOR_DOUYIN_TEST_URL")
@@ -608,18 +669,22 @@ mod tests {
     #[test]
     #[ignore = "requires a live public Douyin video supplied through YTHARBOR_DOUYIN_TEST_URL"]
     fn opens_a_live_playback_stream() {
-        use std::io::Read;
-
         let url = std::env::var("YTHARBOR_DOUYIN_TEST_URL")
             .expect("set YTHARBOR_DOUYIN_TEST_URL before running this ignored test");
         let metadata = super::parse(&url).expect("the public share page should resolve");
-        let mut download = super::open_download(&url, &metadata.formats[0].id)
+        let download = super::open_download(&url, &metadata.formats[0].id)
             .expect("the selected playback stream should open");
-        let mut header = [0_u8; 12];
-        download
-            .response
-            .read_exact(&mut header)
-            .expect("the media stream should be readable");
+        let mut header = Vec::new();
+        let result = super::stream_download(&download, |chunk| {
+            let remaining = 12_usize.saturating_sub(header.len());
+            header.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            if header.len() == 12 {
+                Err("test-stop-after-header".to_owned())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result.unwrap_err(), "test-stop-after-header");
         assert_eq!(&header[4..8], b"ftyp");
     }
 }
