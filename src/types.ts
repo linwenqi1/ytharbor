@@ -1,6 +1,6 @@
 export type Page = "download" | "tasks" | "history" | "settings";
 export type MediaKind = "video" | "audio";
-export type TaskStatus = "pending" | "downloading" | "processing" | "completed" | "failed" | "cancelled";
+export type TaskStatus = "pending" | "downloading" | "processing" | "completed" | "existing" | "failed" | "cancelled";
 
 export interface FormatOption {
   id: string;

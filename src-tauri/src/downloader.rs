@@ -23,6 +23,13 @@ struct QueuedDownload {
     request: DownloadRequest,
 }
 
+#[derive(Default)]
+struct OutputTracker {
+    candidate_path: Option<PathBuf>,
+    final_path: Option<PathBuf>,
+    existing_paths: Vec<PathBuf>,
+}
+
 struct Inner {
     tasks: Mutex<HashMap<String, DownloadTask>>,
     controls: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -156,8 +163,11 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
     });
     let mut args = vec![
         "--newline".to_owned(), "--no-playlist".to_owned(), "--progress".to_owned(),
+        "--encoding".to_owned(), "utf-8".to_owned(),
         "--progress-template".to_owned(), "download:ytharbor-progress:%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s".to_owned(),
+        "--print".to_owned(), "video:ytharbor-candidate:%(filename)s".to_owned(),
         "--print".to_owned(), "after_move:ytharbor-file:%(filepath)s".to_owned(),
+        "--no-quiet".to_owned(),
         "-P".to_owned(), item.request.output_directory.clone(),
     ];
     let template = storage::load_settings(app)
@@ -239,7 +249,7 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
         .and_then(|items| items.get(&item.id).cloned())
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let mut recent = VecDeque::<String>::with_capacity(24);
-    let mut output_path = None;
+    let mut output = OutputTracker::default();
 
     let exit_status = loop {
         if cancel.load(Ordering::Relaxed) {
@@ -257,7 +267,7 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
             return;
         }
         match line_rx.recv_timeout(Duration::from_millis(120)) {
-            Ok(line) => process_line(app, inner, &item.id, &line, &mut output_path, &mut recent),
+            Ok(line) => process_line(app, inner, &item, &line, &mut output, &mut recent),
             Err(mpsc::RecvTimeoutError::Disconnected) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -285,17 +295,13 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
         let _ = handle.join();
     }
     while let Ok(line) = line_rx.try_recv() {
-        process_line(app, inner, &item.id, &line, &mut output_path, &mut recent);
+        process_line(app, inner, &item, &line, &mut output, &mut recent);
     }
     if exit_status.success() {
-        finish_task(
-            app,
-            inner,
-            &item.id,
-            TaskStatus::Completed,
-            output_path,
-            None,
-        );
+        match classify_successful_output(&item.request, &output) {
+            Ok((status, path)) => finish_task(app, inner, &item.id, status, path, None),
+            Err(error) => finish_task(app, inner, &item.id, TaskStatus::Failed, None, Some(error)),
+        }
     } else {
         let message = recent
             .iter()
@@ -574,25 +580,35 @@ fn available_native_path(path: &Path) -> bool {
 fn process_line(
     app: &AppHandle,
     inner: &Arc<Inner>,
-    id: &str,
+    item: &QueuedDownload,
     line: &str,
-    output_path: &mut Option<String>,
+    output: &mut OutputTracker,
     recent: &mut VecDeque<String>,
 ) {
     if let Some(parsed) = progress::parse_progress(line) {
-        update_task(app, inner, id, |task| {
+        update_task(app, inner, &item.id, |task| {
             task.status = TaskStatus::Downloading;
             task.percent = parsed.percent.or(task.percent);
             task.speed = parsed.speed;
             task.eta = parsed.eta;
         });
+    } else if let Some(path) = line.strip_prefix("ytharbor-candidate:") {
+        output.candidate_path = Some(absolute_output_path(
+            &item.request.output_directory,
+            path.trim(),
+        ));
     } else if let Some(path) = line.strip_prefix("ytharbor-file:") {
-        *output_path = Some(path.trim().to_owned());
+        output.final_path = Some(absolute_output_path(
+            &item.request.output_directory,
+            path.trim(),
+        ));
+    } else if let Some(path) = existing_output_path(&item.request.output_directory, line) {
+        output.existing_paths.push(path);
     } else if ["[Merger]", "[ExtractAudio]", "[VideoConvertor]", "[Fixup"]
         .iter()
         .any(|marker| line.contains(marker))
     {
-        update_task(app, inner, id, |task| {
+        update_task(app, inner, &item.id, |task| {
             task.status = TaskStatus::Processing;
             task.percent = Some(100.0);
             task.speed = None;
@@ -604,6 +620,75 @@ fn process_line(
             recent.pop_front();
         }
         recent.push_back(line.trim().to_owned());
+    }
+}
+
+fn absolute_output_path(directory: &str, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        Path::new(directory).join(path)
+    }
+}
+
+fn existing_output_path(directory: &str, line: &str) -> Option<PathBuf> {
+    line.strip_prefix("[download] ")
+        .and_then(|value| value.strip_suffix(" has already been downloaded"))
+        .map(|path| absolute_output_path(directory, path.trim()))
+}
+
+fn resolve_candidate_output(request: &DownloadRequest, candidate: &Path) -> Option<PathBuf> {
+    let expected_extension = match request.kind {
+        crate::models::MediaKind::Video => Some("mp4"),
+        crate::models::MediaKind::Audio => request.audio_format.as_deref(),
+    };
+    if let Some(extension) = expected_extension {
+        let expected = candidate.with_extension(extension);
+        if expected.is_file() {
+            return Some(expected);
+        }
+    }
+    candidate.is_file().then(|| candidate.to_path_buf())
+}
+
+fn classify_successful_output(
+    request: &DownloadRequest,
+    output: &OutputTracker,
+) -> Result<(TaskStatus, Option<String>), String> {
+    let resolved = output
+        .final_path
+        .as_ref()
+        .filter(|path| path.is_file())
+        .cloned()
+        .or_else(|| {
+            output
+                .candidate_path
+                .as_deref()
+                .and_then(|path| resolve_candidate_output(request, path))
+        });
+    if let Some(path) = resolved {
+        let status = if output
+            .existing_paths
+            .iter()
+            .any(|existing| same_file(existing, &path))
+        {
+            TaskStatus::Existing
+        } else {
+            TaskStatus::Completed
+        };
+        return Ok((status, Some(path.to_string_lossy().to_string())));
+    }
+    if !output.existing_paths.is_empty() {
+        return Err("文件已存在，但无法定位现有文件".to_owned());
+    }
+    Ok((TaskStatus::Completed, None))
+}
+
+fn same_file(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
     }
 }
 
@@ -649,7 +734,7 @@ fn finish_task(
         task.output_path = output;
         task.error = error;
         task.updated_at = now_ms();
-        if task.status == TaskStatus::Completed {
+        if matches!(task.status, TaskStatus::Completed | TaskStatus::Existing) {
             task.percent = Some(100.0);
         }
         task.speed = None;
@@ -699,8 +784,11 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_request;
-    use crate::models::{DownloadRequest, MediaKind};
+    use super::{
+        classify_successful_output, existing_output_path, validate_request, OutputTracker,
+    };
+    use crate::models::{DownloadRequest, MediaKind, TaskStatus};
+    use std::fs;
 
     fn request(format_id: &str) -> DownloadRequest {
         DownloadRequest {
@@ -724,5 +812,52 @@ mod tests {
     #[test]
     fn rejects_unscoped_format_ids_with_colons() {
         assert!(validate_request(&request("best:unexpected")).is_err());
+    }
+
+    #[test]
+    fn marks_the_final_file_as_existing_when_yt_dlp_skips_it() {
+        let directory =
+            std::env::temp_dir().join(format!("ytharbor-existing-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("test directory should be created");
+        let path = directory.join("中文视频.mp4");
+        fs::write(&path, []).expect("test file should be created");
+        let line = format!("[download] {} has already been downloaded", path.display());
+        let existing = existing_output_path(directory.to_string_lossy().as_ref(), &line)
+            .expect("existing path should be parsed");
+        let output = OutputTracker {
+            candidate_path: Some(path.clone()),
+            final_path: Some(path.clone()),
+            existing_paths: vec![existing],
+        };
+
+        let (status, output_path) = classify_successful_output(&request("test"), &output)
+            .expect("existing output should be classified");
+
+        assert_eq!(status, TaskStatus::Existing);
+        assert_eq!(
+            output_path.as_deref(),
+            Some(path.to_string_lossy().as_ref())
+        );
+        fs::remove_dir_all(directory).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn keeps_completed_when_only_an_intermediate_file_was_reused() {
+        let directory =
+            std::env::temp_dir().join(format!("ytharbor-completed-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("test directory should be created");
+        let final_path = directory.join("video.mp4");
+        fs::write(&final_path, []).expect("test file should be created");
+        let output = OutputTracker {
+            candidate_path: Some(final_path.clone()),
+            final_path: Some(final_path),
+            existing_paths: vec![directory.join("video.f123.mp4")],
+        };
+
+        let (status, _) = classify_successful_output(&request("test"), &output)
+            .expect("completed output should be classified");
+
+        assert_eq!(status, TaskStatus::Completed);
+        fs::remove_dir_all(directory).expect("test directory should be removed");
     }
 }

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { AppSettings, DownloadRequest, DownloadTask, VideoMetadata } from "../types";
 
 export const parseVideo = (url: string) => invoke<VideoMetadata>("parse_video", { url });
@@ -11,6 +12,7 @@ export const getHistory = () => invoke<DownloadTask[]>("get_history");
 export const clearHistory = () => invoke<void>("clear_history");
 export const getSettings = () => invoke<AppSettings>("get_settings");
 export const saveSettings = (settings: AppSettings) => invoke<AppSettings>("save_settings", { settings });
+export const revealDownload = (path: string) => revealItemInDir(path);
 
 export const onTaskUpdated = (handler: (task: DownloadTask) => void): Promise<UnlistenFn> =>
   listen<DownloadTask>("download://updated", (event) => handler(event.payload));

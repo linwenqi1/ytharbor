@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "YtHarbor main window permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "opener:allow-reveal-item-in-dir"
+  ]
 }

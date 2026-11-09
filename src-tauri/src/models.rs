@@ -51,6 +51,7 @@ pub enum TaskStatus {
     Downloading,
     Processing,
     Completed,
+    Existing,
     Failed,
     Cancelled,
 }
