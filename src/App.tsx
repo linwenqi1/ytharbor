@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { NoticeViewport, type Notice } from "./components/NoticeToast";
 import { Sidebar } from "./components/Sidebar";
 import { useDownloads } from "./hooks/useDownloads";
+import { useUpdater } from "./hooks/useUpdater";
 import { getSettings, revealDownload } from "./lib/tauri";
 import { Home } from "./pages/Home";
 import { Downloads } from "./pages/Downloads";
@@ -33,6 +34,7 @@ export default function App() {
     pushNotice({ title: "下载完成", message: task.title, actionLabel: "查看文件", action: () => revealTask(task) });
   }, [pushNotice, revealTask]);
   const { tasks, start, cancel } = useDownloads(handleCompleted);
+  const updater = useUpdater();
   const activeCount = useMemo(() => tasks.filter((task) => ["pending", "downloading", "processing"].includes(task.status)).length, [tasks]);
   const terminalCount = useMemo(() => tasks.filter((task) => ["completed", "existing", "failed", "cancelled"].includes(task.status)).length, [tasks]);
   useEffect(() => { getSettings().then(setSettings).catch(() => undefined); }, []);
@@ -45,7 +47,7 @@ export default function App() {
         {page === "download" && <Home settings={settings} onStart={start} onTaskCreated={() => setPage("tasks")} />}
         {page === "tasks" && <Downloads tasks={tasks} onCancel={cancel} onReveal={revealTask} />}
         {page === "history" && <History refreshKey={historyKey} onReveal={revealTask} />}
-        {page === "settings" && <Settings settings={settings} onSaved={setSettings} />}
+        {page === "settings" && <Settings settings={settings} onSaved={setSettings} activeDownloadCount={activeCount} updater={updater} />}
       </main>
       <NoticeViewport notices={notices} onDismiss={dismissNotice} />
     </div>

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 experiments/
+.local/
 src-tauri/target/
 src-tauri/gen/schemas/
 src-tauri/binaries/yt-dlp*

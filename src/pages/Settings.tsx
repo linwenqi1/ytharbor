@@ -1,16 +1,31 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Icon } from "../components/Icon";
+import type { UpdaterController } from "../hooks/useUpdater";
 import { friendlyError, saveSettings } from "../lib/tauri";
 import type { AppSettings } from "../types";
 
 const fixedFilenameTemplate = "%(title)s [%(id)s] [%(quality)s].%(ext)s";
 const withFixedFilenameTemplate = (settings: AppSettings): AppSettings => ({ ...settings, filenameTemplate: fixedFilenameTemplate });
 
-export function Settings({ settings, onSaved }: { settings: AppSettings; onSaved: (value: AppSettings) => void }) {
+interface SettingsProps {
+  settings: AppSettings;
+  onSaved: (value: AppSettings) => void;
+  activeDownloadCount: number;
+  updater: UpdaterController;
+}
+
+export function Settings({ settings, onSaved, activeDownloadCount, updater }: SettingsProps) {
   const [form, setForm] = useState(() => withFixedFilenameTemplate(settings));
   const [message, setMessage] = useState("");
+  const [showUpdateDetails, setShowUpdateDetails] = useState(false);
   useEffect(() => setForm(withFixedFilenameTemplate(settings)), [settings]);
+  const { status } = updater;
+  const hasUpdate = status.availableVersion != null && status.errorStage !== "check";
+  const check = async () => {
+    setShowUpdateDetails(false);
+    if (await updater.checkForUpdates()) setShowUpdateDetails(true);
+  };
   const choose = async () => {
     const value = await open({ directory: true, multiple: false, defaultPath: form.outputDirectory });
     if (typeof value === "string") setForm({ ...form, outputDirectory: value });
@@ -27,7 +42,45 @@ export function Settings({ settings, onSaved }: { settings: AppSettings; onSaved
         <div className="setting-row"><div><label>默认画质</label><p>解析后优先选择，可随时更改</p></div><select value={form.defaultQuality} onChange={(e) => setForm({ ...form, defaultQuality: e.target.value })}><option>1080p</option><option>720p</option><option>480p</option><option>360p</option></select></div>
         <div className="setting-row"><div><label>文件名模板</label><p>支持 %(title)s、%(id)s、%(quality)s、%(ext)s</p></div><input className="setting-input" value={form.filenameTemplate} disabled title="暂未开放自定义文件名模板" /></div>
       </section>
-      <section className="settings-card info-card"><div className="setting-row"><div><label>下载核心</label><p>yt-dlp + FFmpeg · 随应用在本地运行</p></div><span className="local-badge"><i />本地模式</span></div><div className="supported"><span>YouTube</span><span>Bilibili</span><span>抖音</span><span>TikTok</span><small>v0.2.0</small></div></section>
+      <section className="settings-card info-card">
+        <div className="setting-row"><div><label>下载核心</label><p>yt-dlp + FFmpeg · 随应用在本地运行</p></div><span className="local-badge"><i />本地模式</span></div>
+        <div className="setting-row version-row">
+          <div>
+            <div className="setting-label-line"><label>应用版本</label>{hasUpdate && <span className="update-badge">发现 v{status.availableVersion}</span>}</div>
+            <p>{status.phase === "upToDate" ? "当前已是最新版本" : `当前版本 v${status.currentVersion}`}</p>
+          </div>
+          <div className="version-actions">
+            {hasUpdate ? (
+              <button className="secondary-button compact-button" onClick={() => setShowUpdateDetails((value) => !value)} disabled={status.phase === "downloading" || status.phase === "installing"}>
+                <Icon name={status.phase === "ready" ? "check" : "download"} size={15} />
+                {showUpdateDetails ? "收起" : status.phase === "ready" ? "继续更新" : "查看更新"}
+              </button>
+            ) : (
+              <button className="secondary-button compact-button" onClick={() => void check()} disabled={status.phase === "checking"}>
+                <Icon name="refresh" size={15} />{status.phase === "checking" ? "正在检查" : status.phase === "error" ? "重新检查" : "检查更新"}
+              </button>
+            )}
+          </div>
+        </div>
+        {status.phase === "error" && status.errorStage === "check" && <div className="update-inline-error">{status.error}</div>}
+        {showUpdateDetails && hasUpdate && (
+          <div className="update-panel">
+            <div className="update-panel-heading"><div><span>NEW RELEASE</span><h3>YtHarbor v{status.availableVersion}</h3></div>{status.phase === "ready" && <span className="ready-badge"><Icon name="check" size={13} />已下载</span>}</div>
+            {status.phase === "available" && <>
+              <p className="update-notes">{status.notes || "此版本包含功能改进和问题修复。"}</p>
+              <div className="update-panel-actions"><button className="text-button" onClick={() => setShowUpdateDetails(false)}>稍后</button><button className="primary-button update-button" onClick={() => void updater.downloadUpdate()}><Icon name="download" size={16} />下载更新</button></div>
+            </>}
+            {status.phase === "downloading" && <div className="update-download"><div><span>正在下载更新…</span><b>{status.progress == null ? "—" : `${status.progress}%`}</b></div><div className="progress"><i className={status.progress == null ? "indeterminate" : ""} style={status.progress == null ? undefined : { width: `${status.progress}%` }} /></div><p>下载期间可以继续使用应用，请不要关闭窗口。</p></div>}
+            {status.phase === "ready" && <>
+              {activeDownloadCount > 0 ? <div className="update-blocked">还有 {activeDownloadCount} 个下载任务正在进行。为避免任务中断，请等待全部完成后再安装。</div> : <p className="update-confirm">安装时应用会短暂关闭，并在完成后自动重新打开。</p>}
+              <div className="update-panel-actions"><button className="text-button" onClick={() => setShowUpdateDetails(false)}>稍后安装</button><button className="primary-button update-button" disabled={activeDownloadCount > 0} onClick={() => void updater.installUpdate()}><Icon name="refresh" size={16} />安装并重启</button></div>
+            </>}
+            {status.phase === "installing" && <div className="update-installing"><span className="inline-spinner" />正在启动安装程序，应用即将重新打开…</div>}
+            {status.phase === "error" && status.errorStage !== "check" && <><div className="update-blocked error">{status.error}</div><div className="update-panel-actions"><button className="text-button" onClick={() => setShowUpdateDetails(false)}>稍后</button><button className="secondary-button compact-button" onClick={() => void (status.errorStage === "install" ? updater.installUpdate() : updater.downloadUpdate())}>重试</button></div></>}
+          </div>
+        )}
+        <div className="supported"><span>YouTube</span><span>Bilibili</span><span>抖音</span><span>TikTok</span><small>本地处理 · 不上传下载内容</small></div>
+      </section>
       <div className="save-bar">{message && <span>{message}</span>}<button className="primary-button" onClick={save}>保存设置</button></div>
     </div>
   );

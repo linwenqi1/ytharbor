@@ -3,7 +3,7 @@ name: Publish Windows release
 on:
   push:
     tags:
-      - "*"
+      - "v*"
 
 # Avoid two runs trying to create or update the same GitHub Release.
 concurrency:
@@ -49,14 +49,14 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: YtHarbor ${{ github.ref_name }}
           releaseBody: |
             ## Windows installers
 
-            - `.msi`: suitable for managed or Windows Installer deployments.
-            - `-setup.exe`: recommended for most users; run the installer to get started.
+            Download the `-setup.exe` installer. Future versions can then be installed from YtHarbor's settings page.
 
             ## Changelog
 
@@ -64,4 +64,6 @@ jobs:
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
-          args: --bundles msi,nsis
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: --bundles nsis --config src-tauri/tauri.release.conf.json

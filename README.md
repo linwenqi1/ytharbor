@@ -13,6 +13,7 @@
 - YouTube、Bilibili 与 TikTok 单视频解析与下载（yt-dlp）
 - 抖音公开单视频原生解析与无水印播放流下载；仅使用应用本次运行的匿名访客会话，不读取浏览器 Cookie
 - Windows sidecar / FFmpeg / Deno 资源打包配置（完整 YouTube 提取链路）
+- 设置页静默检查、确认下载和安装应用更新
 
 播放列表、Cookie、代理、字幕和核心在线更新有意留到后续版本，当前范围保持简单。
 
@@ -52,7 +53,9 @@ npm run tauri build
 
 ## 自动发布 Windows 安装包
 
-推送任意 Git Tag 会触发 `.github/workflows/release.yml`：GitHub Actions 会在 Windows runner 上准备下载核心、构建 MSI 和 NSIS `-setup.exe`，并将这两个文件上传到同名 GitHub Release。
+推送 `v*` Git Tag 会触发 `.github/workflows/release.yml`：GitHub Actions 会在 Windows runner 上准备下载核心、构建签名的 NSIS `-setup.exe` 更新包，并将安装器、更新签名和 `latest.json` 上传到同名 GitHub Release。
+
+自动更新使用免费的 Tauri 更新签名，不依赖付费的 Windows 代码签名证书。首次发布前，将本地生成且已被 Git 忽略的 `.local/ytharbor-updater.key` 内容保存到仓库的 GitHub Actions Secret `TAURI_SIGNING_PRIVATE_KEY`，并在安全位置备份该私钥。私钥丢失后，现有安装无法验证后续更新。
 
 发布前请先把项目版本更新为要发布的版本（`package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json`），然后推送 Tag，例如：
 
