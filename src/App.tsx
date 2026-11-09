@@ -9,7 +9,7 @@ import { History } from "./pages/History";
 import { Settings } from "./pages/Settings";
 import type { AppSettings, DownloadTask, Page } from "./types";
 
-const fallback: AppSettings = { outputDirectory: "", defaultQuality: "1080p", filenameTemplate: "%(title)s [%(id)s].%(ext)s" };
+const fallback: AppSettings = { outputDirectory: "", defaultQuality: "1080p", filenameTemplate: "%(title)s [%(id)s] [%(quality)s].%(ext)s" };
 let nextNoticeId = 0;
 
 export default function App() {

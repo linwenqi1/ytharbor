@@ -26,7 +26,7 @@ pub fn load_settings(app: &AppHandle) -> Result<AppSettings, String> {
     let settings = AppSettings {
         output_directory: downloads.to_string_lossy().to_string(),
         default_quality: "1080p".to_owned(),
-        filename_template: "%(title)s [%(id)s].%(ext)s".to_owned(),
+        filename_template: "%(title)s [%(id)s] [%(quality)s].%(ext)s".to_owned(),
     };
     write_json(&path, &settings)?;
     Ok(settings)

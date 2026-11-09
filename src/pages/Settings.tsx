@@ -4,10 +4,13 @@ import { Icon } from "../components/Icon";
 import { friendlyError, saveSettings } from "../lib/tauri";
 import type { AppSettings } from "../types";
 
+const fixedFilenameTemplate = "%(title)s [%(id)s] [%(quality)s].%(ext)s";
+const withFixedFilenameTemplate = (settings: AppSettings): AppSettings => ({ ...settings, filenameTemplate: fixedFilenameTemplate });
+
 export function Settings({ settings, onSaved }: { settings: AppSettings; onSaved: (value: AppSettings) => void }) {
-  const [form, setForm] = useState(settings);
+  const [form, setForm] = useState(() => withFixedFilenameTemplate(settings));
   const [message, setMessage] = useState("");
-  useEffect(() => setForm(settings), [settings]);
+  useEffect(() => setForm(withFixedFilenameTemplate(settings)), [settings]);
   const choose = async () => {
     const value = await open({ directory: true, multiple: false, defaultPath: form.outputDirectory });
     if (typeof value === "string") setForm({ ...form, outputDirectory: value });
@@ -22,7 +25,7 @@ export function Settings({ settings, onSaved }: { settings: AppSettings; onSaved
       <section className="settings-card">
         <div className="setting-row"><div><label>下载位置</label><p>视频与音频保存到这里</p></div><div className="path-picker"><span title={form.outputDirectory}>{form.outputDirectory || "未选择"}</span><button className="secondary-button" onClick={choose}><Icon name="folder" size={17} />选择</button></div></div>
         <div className="setting-row"><div><label>默认画质</label><p>解析后优先选择，可随时更改</p></div><select value={form.defaultQuality} onChange={(e) => setForm({ ...form, defaultQuality: e.target.value })}><option>1080p</option><option>720p</option><option>480p</option><option>360p</option></select></div>
-        <div className="setting-row"><div><label>文件名模板</label><p>支持 %(title)s、%(id)s、%(ext)s</p></div><input className="setting-input" value={form.filenameTemplate} onChange={(e) => setForm({ ...form, filenameTemplate: e.target.value })} /></div>
+        <div className="setting-row"><div><label>文件名模板</label><p>支持 %(title)s、%(id)s、%(quality)s、%(ext)s</p></div><input className="setting-input" value={form.filenameTemplate} disabled title="暂未开放自定义文件名模板" /></div>
       </section>
       <section className="settings-card info-card"><div className="setting-row"><div><label>下载核心</label><p>yt-dlp + FFmpeg · 随应用在本地运行</p></div><span className="local-badge"><i />本地模式</span></div><div className="supported"><span>YouTube</span><span>Bilibili</span><span>抖音</span><span>TikTok</span><small>v0.2.0</small></div></section>
       <div className="save-bar">{message && <span>{message}</span>}<button className="primary-button" onClick={save}>保存设置</button></div>

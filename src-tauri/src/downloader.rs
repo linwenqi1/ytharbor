@@ -173,6 +173,7 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
     let template = storage::load_settings(app)
         .map(|value| value.filename_template)
         .unwrap_or_else(|_| "%(title)s [%(id)s].%(ext)s".to_owned());
+    let template = variant_output_template(&template, &item.request);
     args.extend(["-o".to_owned(), template]);
     match item.request.kind {
         crate::models::MediaKind::Video => {
@@ -352,7 +353,20 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
     let template = storage::load_settings(app)
         .map(|value| value.filename_template)
         .unwrap_or_else(|_| "%(title)s [%(id)s].%(ext)s".to_owned());
+    let template = variant_output_template(&template, &item.request);
     let output_path = native_output_path(&item.request, &template, &download.id);
+    if output_path.is_file() {
+        finish_task(
+            app,
+            inner,
+            &item.id,
+            TaskStatus::Existing,
+            Some(output_path.to_string_lossy().to_string()),
+            None,
+        );
+        cleanup(inner, &item.id);
+        return;
+    }
     let partial_path = output_path.with_file_name(format!(
         "{}.part",
         output_path
@@ -491,14 +505,16 @@ fn native_output_path(request: &DownloadRequest, template: &str, video_id: &str)
     // resolvers intentionally support the documented core fields; fall back to
     // a predictable filename if an unsupported token remains.
     let filename = if rendered.contains("%(") {
-        format!("{} [{}].mp4", request.title, video_id)
+        format!(
+            "{} [{}] [{}].mp4",
+            request.title,
+            video_id,
+            download_variant(request)
+        )
     } else {
         rendered
     };
-    unique_path(
-        Path::new(&request.output_directory),
-        &sanitize_filename(&filename),
-    )
+    Path::new(&request.output_directory).join(sanitize_filename(&filename))
 }
 
 fn sanitize_filename(value: &str) -> String {
@@ -551,30 +567,6 @@ fn sanitize_filename(value: &str) -> String {
         clean = format!("video-{clean}");
     }
     clean
-}
-
-fn unique_path(directory: &Path, filename: &str) -> PathBuf {
-    let candidate = directory.join(filename);
-    if available_native_path(&candidate) {
-        return candidate;
-    }
-    let stem = candidate.file_stem().unwrap_or_default().to_string_lossy();
-    let extension = candidate
-        .extension()
-        .map(|extension| format!(".{}", extension.to_string_lossy()))
-        .unwrap_or_default();
-    for index in 2..10_000 {
-        let candidate = directory.join(format!("{stem}-{index}{extension}"));
-        if available_native_path(&candidate) {
-            return candidate;
-        }
-    }
-    directory.join(format!("{stem}-{}{}", uuid::Uuid::new_v4(), extension))
-}
-
-fn available_native_path(path: &Path) -> bool {
-    let partial = path.with_file_name(format!("{}.part", path.file_name().unwrap_or_default().to_string_lossy()));
-    !path.exists() && !partial.exists()
 }
 
 fn process_line(
@@ -630,6 +622,54 @@ fn absolute_output_path(directory: &str, value: &str) -> PathBuf {
     } else {
         Path::new(directory).join(path)
     }
+}
+
+fn variant_output_template(template: &str, request: &DownloadRequest) -> String {
+    let variant = download_variant(request);
+    if template.contains("%(quality)s") {
+        return template.replace("%(quality)s", &variant);
+    }
+    let Some(extension_at) = template.rfind("%(ext)s") else {
+        return template.to_owned();
+    };
+    let (prefix, suffix) = template.split_at(extension_at);
+    if let Some(stem) = prefix.strip_suffix('.') {
+        format!("{stem} [{variant}].{suffix}")
+    } else {
+        format!("{prefix} [{variant}]{suffix}")
+    }
+}
+
+fn download_variant(request: &DownloadRequest) -> String {
+    match request.kind {
+        crate::models::MediaKind::Video => {
+            let label = sanitize_variant(&request.format_label);
+            if label.is_empty() {
+                format!("format-{}", sanitize_variant(&request.format_id))
+            } else {
+                label
+            }
+        }
+        crate::models::MediaKind::Audio => format!(
+            "audio-{}",
+            request.audio_format.as_deref().unwrap_or("audio")
+        ),
+    }
+}
+
+fn sanitize_variant(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned()
 }
 
 fn existing_output_path(directory: &str, line: &str) -> Option<PathBuf> {
@@ -785,7 +825,8 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_successful_output, existing_output_path, validate_request, OutputTracker,
+        classify_successful_output, existing_output_path, native_output_path, validate_request,
+        variant_output_template, OutputTracker,
     };
     use crate::models::{DownloadRequest, MediaKind, TaskStatus};
     use std::fs;
@@ -812,6 +853,70 @@ mod tests {
     #[test]
     fn rejects_unscoped_format_ids_with_colons() {
         assert!(validate_request(&request("best:unexpected")).is_err());
+    }
+
+    #[test]
+    fn adds_the_selected_quality_to_legacy_templates() {
+        let mut request = request("30016");
+        request.format_label = "360p".to_owned();
+
+        assert_eq!(
+            variant_output_template("%(title)s [%(id)s].%(ext)s", &request),
+            "%(title)s [%(id)s] [360p].%(ext)s"
+        );
+    }
+
+    #[test]
+    fn gives_different_qualities_different_output_templates() {
+        let mut low = request("30016");
+        low.format_label = "360p".to_owned();
+        let mut high = request("30080");
+        high.format_label = "1080p".to_owned();
+        let template = "%(title)s [%(id)s].%(ext)s";
+
+        assert_ne!(
+            variant_output_template(template, &low),
+            variant_output_template(template, &high)
+        );
+    }
+
+    #[test]
+    fn gives_douyin_qualities_stable_distinct_paths() {
+        let mut low = request("douyin:720p");
+        low.format_label = "720p".to_owned();
+        let mut high = request("douyin:1080p");
+        high.format_label = "1080p".to_owned();
+        let base_template = "%(title)s [%(id)s].%(ext)s";
+        let low_template = variant_output_template(base_template, &low);
+        let high_template = variant_output_template(base_template, &high);
+
+        let first_low = native_output_path(&low, &low_template, "7699483289760959786");
+        let second_low = native_output_path(&low, &low_template, "7699483289760959786");
+        let high_path = native_output_path(&high, &high_template, "7699483289760959786");
+
+        assert_eq!(first_low, second_low);
+        assert_ne!(first_low, high_path);
+        assert!(first_low.to_string_lossy().contains("[720p]"));
+        assert!(high_path.to_string_lossy().contains("[1080p]"));
+    }
+
+    #[test]
+    fn replaces_the_quality_placeholder_for_video_and_audio() {
+        let mut video = request("30080");
+        video.format_label = "1080p".to_owned();
+        let mut audio = request("bestaudio");
+        audio.kind = MediaKind::Audio;
+        audio.audio_format = Some("mp3".to_owned());
+        let template = "%(title)s [%(id)s] [%(quality)s].%(ext)s";
+
+        assert_eq!(
+            variant_output_template(template, &video),
+            "%(title)s [%(id)s] [1080p].%(ext)s"
+        );
+        assert_eq!(
+            variant_output_template(template, &audio),
+            "%(title)s [%(id)s] [audio-mp3].%(ext)s"
+        );
     }
 
     #[test]
