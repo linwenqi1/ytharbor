@@ -3,7 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
 export type UpdatePhase = "idle" | "checking" | "upToDate" | "available" | "downloading" | "ready" | "installing" | "error";
-export type UpdateErrorStage = "check" | "download" | "install";
+export type UpdateErrorStage = "download" | "install";
 
 export interface UpdateStatus {
   phase: UpdatePhase;
@@ -17,7 +17,6 @@ export interface UpdateStatus {
 
 export interface UpdaterController {
   status: UpdateStatus;
-  checkForUpdates: () => Promise<boolean>;
   downloadUpdate: () => Promise<void>;
   installUpdate: () => Promise<void>;
 }
@@ -38,8 +37,8 @@ export function useUpdater(): UpdaterController {
   const busyRef = useRef(false);
   const mountedRef = useRef(true);
 
-  const runCheck = useCallback(async (interactive: boolean) => {
-    if (busyRef.current) return false;
+  const runCheck = useCallback(async () => {
+    if (busyRef.current) return;
     busyRef.current = true;
     setStatus((current) => ({ ...current, phase: "checking", error: null, errorStage: null, progress: null }));
 
@@ -52,12 +51,12 @@ export function useUpdater(): UpdaterController {
       const update = await check({ timeout: 12_000 });
       if (!mountedRef.current) {
         await update?.close().catch(() => undefined);
-        return false;
+        return;
       }
 
       if (!update) {
         setStatus({ ...initialStatus, phase: "upToDate", currentVersion });
-        return false;
+        return;
       }
 
       updateRef.current = update;
@@ -68,27 +67,14 @@ export function useUpdater(): UpdaterController {
         availableVersion: update.version,
         notes: update.body?.trim() || null,
       });
-      return true;
     } catch {
       if (mountedRef.current) {
-        if (interactive) {
-          setStatus((current) => ({
-            ...current,
-            phase: "error",
-            error: "无法检查更新，请确认网络连接后重试。",
-            errorStage: "check",
-          }));
-        } else {
-          setStatus((current) => ({ ...current, phase: "idle", error: null, errorStage: null }));
-        }
+        setStatus((current) => ({ ...current, phase: "idle", error: null, errorStage: null }));
       }
-      return false;
     } finally {
       busyRef.current = false;
     }
   }, []);
-
-  const checkForUpdates = useCallback(() => runCheck(true), [runCheck]);
 
   const downloadUpdate = useCallback(async () => {
     const update = updateRef.current;
@@ -153,7 +139,7 @@ export function useUpdater(): UpdaterController {
       if (mountedRef.current) setStatus((current) => ({ ...current, currentVersion: version }));
     }).catch(() => undefined);
 
-    const timer = window.setTimeout(() => { void runCheck(false); }, 3_000);
+    const timer = window.setTimeout(() => { void runCheck(); }, 3_000);
     return () => {
       mountedRef.current = false;
       window.clearTimeout(timer);
@@ -163,5 +149,5 @@ export function useUpdater(): UpdaterController {
     };
   }, [runCheck]);
 
-  return { status, checkForUpdates, downloadUpdate, installUpdate };
+  return { status, downloadUpdate, installUpdate };
 }

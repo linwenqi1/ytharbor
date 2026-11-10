@@ -21,11 +21,13 @@ export function Settings({ settings, onSaved, activeDownloadCount, updater }: Se
   const [showUpdateDetails, setShowUpdateDetails] = useState(false);
   useEffect(() => setForm(withFixedFilenameTemplate(settings)), [settings]);
   const { status } = updater;
-  const hasUpdate = status.availableVersion != null && status.errorStage !== "check";
-  const check = async () => {
-    setShowUpdateDetails(false);
-    if (await updater.checkForUpdates()) setShowUpdateDetails(true);
-  };
+  const hasUpdate = status.availableVersion != null;
+  const updateBadgeText = status.phase === "downloading"
+    ? `下载中${status.progress == null ? "" : ` ${status.progress}%`}`
+    : status.phase === "ready" ? "等待安装"
+    : status.phase === "installing" ? "正在安装"
+    : status.phase === "error" ? "更新失败"
+    : `新版本 v${status.availableVersion}`;
   const choose = async () => {
     const value = await open({ directory: true, multiple: false, defaultPath: form.outputDirectory });
     if (typeof value === "string") setForm({ ...form, outputDirectory: value });
@@ -46,23 +48,11 @@ export function Settings({ settings, onSaved, activeDownloadCount, updater }: Se
         <div className="setting-row"><div><label>下载核心</label><p>yt-dlp + FFmpeg · 随应用在本地运行</p></div><span className="local-badge"><i />本地模式</span></div>
         <div className="setting-row version-row">
           <div>
-            <div className="setting-label-line"><label>应用版本</label>{hasUpdate && <span className="update-badge">发现 v{status.availableVersion}</span>}</div>
-            <p>{status.phase === "upToDate" ? "当前已是最新版本" : `当前版本 v${status.currentVersion}`}</p>
+            <label>应用版本</label>
+            <p>当前版本 v{status.currentVersion}</p>
           </div>
-          <div className="version-actions">
-            {hasUpdate ? (
-              <button className="secondary-button compact-button" onClick={() => setShowUpdateDetails((value) => !value)} disabled={status.phase === "downloading" || status.phase === "installing"}>
-                <Icon name={status.phase === "ready" ? "check" : "download"} size={15} />
-                {showUpdateDetails ? "收起" : status.phase === "ready" ? "继续更新" : "查看更新"}
-              </button>
-            ) : (
-              <button className="secondary-button compact-button" onClick={() => void check()} disabled={status.phase === "checking"}>
-                <Icon name="refresh" size={15} />{status.phase === "checking" ? "正在检查" : status.phase === "error" ? "重新检查" : "检查更新"}
-              </button>
-            )}
-          </div>
+          {hasUpdate && <button className={`update-badge ${status.phase}`} onClick={() => setShowUpdateDetails((value) => !value)} disabled={status.phase === "downloading" || status.phase === "installing"}><i />{updateBadgeText}</button>}
         </div>
-        {status.phase === "error" && status.errorStage === "check" && <div className="update-inline-error">{status.error}</div>}
         {showUpdateDetails && hasUpdate && (
           <div className="update-panel">
             <div className="update-panel-heading"><div><span>NEW RELEASE</span><h3>YtHarbor v{status.availableVersion}</h3></div>{status.phase === "ready" && <span className="ready-badge"><Icon name="check" size={13} />已下载</span>}</div>
@@ -76,7 +66,7 @@ export function Settings({ settings, onSaved, activeDownloadCount, updater }: Se
               <div className="update-panel-actions"><button className="text-button" onClick={() => setShowUpdateDetails(false)}>稍后安装</button><button className="primary-button update-button" disabled={activeDownloadCount > 0} onClick={() => void updater.installUpdate()}><Icon name="refresh" size={16} />安装并重启</button></div>
             </>}
             {status.phase === "installing" && <div className="update-installing"><span className="inline-spinner" />正在启动安装程序，应用即将重新打开…</div>}
-            {status.phase === "error" && status.errorStage !== "check" && <><div className="update-blocked error">{status.error}</div><div className="update-panel-actions"><button className="text-button" onClick={() => setShowUpdateDetails(false)}>稍后</button><button className="secondary-button compact-button" onClick={() => void (status.errorStage === "install" ? updater.installUpdate() : updater.downloadUpdate())}>重试</button></div></>}
+            {status.phase === "error" && <><div className="update-blocked error">{status.error}</div><div className="update-panel-actions"><button className="text-button" onClick={() => setShowUpdateDetails(false)}>稍后</button><button className="secondary-button compact-button" onClick={() => void (status.errorStage === "install" ? updater.installUpdate() : updater.downloadUpdate())}>重试</button></div></>}
           </div>
         )}
         <div className="supported"><span>YouTube</span><span>Bilibili</span><span>抖音</span><span>TikTok</span><small>本地处理 · 不上传下载内容</small></div>
