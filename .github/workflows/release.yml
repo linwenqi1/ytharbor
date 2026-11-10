@@ -27,6 +27,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
+          registry-url: https://registry.npmjs.org
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -37,7 +38,7 @@ jobs:
           workspaces: ./src-tauri -> target
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
 
       # The application bundles these binaries so end users do not need to
       # install yt-dlp, FFmpeg, or Deno separately.
