@@ -24,7 +24,7 @@ function NoticeCard({ notice, onDismiss }: { notice: Notice; onDismiss: (id: num
   return (
     <aside className={`notice-toast ${notice.tone === "error" ? "error" : ""}`} role="status">
       <span className="notice-mark"><Icon name={notice.tone === "error" ? "close" : "check"} size={15} /></span>
-      <div className="notice-copy"><strong>{notice.title}</strong><p title={notice.message}>{notice.message}</p></div>
+      <div className="notice-copy"><strong title={notice.title}>{notice.title}</strong><p title={notice.message}>{notice.message}</p></div>
       {notice.action && notice.actionLabel && <button className="notice-action" onClick={runAction}><Icon name="folder" size={14} />{notice.actionLabel}</button>}
       <button className="notice-close" aria-label="关闭提示" onClick={() => onDismiss(notice.id)}><Icon name="close" size={14} /></button>
     </aside>
