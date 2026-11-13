@@ -5,6 +5,7 @@ mod metadata;
 mod models;
 mod progress;
 mod storage;
+mod updater;
 
 use downloader::AppState;
 use tauri::Manager;
@@ -17,6 +18,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             app.manage(AppState::new(app.handle().clone()));
+            app.manage(updater::UpdateState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -28,6 +30,9 @@ pub fn run() {
             commands::clear_history,
             commands::get_settings,
             commands::save_settings,
+            updater::check_update,
+            updater::download_update,
+            updater::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running YtHarbor");

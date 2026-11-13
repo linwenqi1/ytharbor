@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { check, type Update } from "@tauri-apps/plugin-updater";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 export type UpdatePhase = "idle" | "checking" | "upToDate" | "available" | "downloading" | "ready" | "installing" | "error";
 export type UpdateErrorStage = "download" | "install";
@@ -11,6 +11,7 @@ export interface UpdateStatus {
   availableVersion: string | null;
   notes: string | null;
   progress: number | null;
+  reconnecting: boolean;
   error: string | null;
   errorStage: UpdateErrorStage | null;
 }
@@ -27,39 +28,34 @@ const initialStatus: UpdateStatus = {
   availableVersion: null,
   notes: null,
   progress: null,
+  reconnecting: false,
   error: null,
   errorStage: null,
 };
 
 export function useUpdater(): UpdaterController {
   const [status, setStatus] = useState(initialStatus);
-  const updateRef = useRef<Update | null>(null);
+  const hasUpdateRef = useRef(false);
   const busyRef = useRef(false);
   const mountedRef = useRef(true);
 
   const runCheck = useCallback(async () => {
     if (busyRef.current) return;
     busyRef.current = true;
-    setStatus((current) => ({ ...current, phase: "checking", error: null, errorStage: null, progress: null }));
+    setStatus((current) => ({ ...current, phase: "checking", error: null, errorStage: null, progress: null, reconnecting: false }));
 
     try {
       const currentVersion = await getVersion();
-      const previous = updateRef.current;
-      updateRef.current = null;
-      if (previous) await previous.close().catch(() => undefined);
-
-      const update = await check({ timeout: 12_000 });
-      if (!mountedRef.current) {
-        await update?.close().catch(() => undefined);
-        return;
-      }
+      const update = await invoke<{ currentVersion: string; version: string; body?: string } | null>("check_update");
+      if (!mountedRef.current) return;
 
       if (!update) {
+        hasUpdateRef.current = false;
         setStatus({ ...initialStatus, phase: "upToDate", currentVersion });
         return;
       }
 
-      updateRef.current = update;
+      hasUpdateRef.current = true;
       setStatus({
         ...initialStatus,
         phase: "available",
@@ -77,33 +73,36 @@ export function useUpdater(): UpdaterController {
   }, []);
 
   const downloadUpdate = useCallback(async () => {
-    const update = updateRef.current;
-    if (!update || busyRef.current) return;
+    if (!hasUpdateRef.current || busyRef.current) return;
     busyRef.current = true;
-    let downloaded = 0;
-    let total: number | undefined;
-    setStatus((current) => ({ ...current, phase: "downloading", progress: 0, error: null, errorStage: null }));
+    setStatus((current) => ({ ...current, phase: "downloading", error: null, errorStage: null, reconnecting: false }));
 
     try {
-      await update.download((event) => {
+      const onEvent = new Channel<
+        | { event: "progress"; data: { downloaded: number; total: number | null } }
+        | { event: "reconnecting"; data: { attempt: number; delaySeconds: number } }
+        | { event: "finished" }
+      >();
+      onEvent.onmessage = (event) => {
         if (!mountedRef.current) return;
-        if (event.event === "Started") {
-          total = event.data.contentLength;
-          setStatus((current) => ({ ...current, progress: total ? 0 : null }));
-        } else if (event.event === "Progress") {
-          downloaded += event.data.chunkLength;
-          if (total) setStatus((current) => ({ ...current, progress: Math.min(100, Math.round((downloaded / total!) * 100)) }));
-        } else if (event.event === "Finished") {
-          setStatus((current) => ({ ...current, progress: 100 }));
+        if (event.event === "progress") {
+          const { downloaded, total } = event.data;
+          setStatus((current) => ({ ...current, reconnecting: false, progress: total ? Math.min(100, Math.round((downloaded / total) * 100)) : null }));
+        } else if (event.event === "reconnecting") {
+          setStatus((current) => ({ ...current, reconnecting: true }));
+        } else if (event.event === "finished") {
+          setStatus((current) => ({ ...current, reconnecting: false, progress: 100 }));
         }
-      }, { timeout: 120_000 });
-      if (mountedRef.current) setStatus((current) => ({ ...current, phase: "ready", progress: 100 }));
-    } catch {
+      };
+      await invoke("download_update", { onEvent });
+      if (mountedRef.current) setStatus((current) => ({ ...current, phase: "ready", reconnecting: false, progress: 100 }));
+    } catch (error) {
       if (mountedRef.current) {
         setStatus((current) => ({
           ...current,
           phase: "error",
-          error: "更新下载失败，请稍后重试。",
+          reconnecting: false,
+          error: String(error) || "更新下载失败，请稍后重试。",
           errorStage: "download",
         }));
       }
@@ -113,13 +112,12 @@ export function useUpdater(): UpdaterController {
   }, []);
 
   const installUpdate = useCallback(async () => {
-    const update = updateRef.current;
-    if (!update || busyRef.current) return;
+    if (!hasUpdateRef.current || busyRef.current) return;
     busyRef.current = true;
     setStatus((current) => ({ ...current, phase: "installing", error: null, errorStage: null }));
 
     try {
-      await update.install({ restartAfterInstall: true });
+      await invoke("install_update");
     } catch {
       busyRef.current = false;
       if (mountedRef.current) {
@@ -143,9 +141,6 @@ export function useUpdater(): UpdaterController {
     return () => {
       mountedRef.current = false;
       window.clearTimeout(timer);
-      const update = updateRef.current;
-      updateRef.current = null;
-      if (update && !busyRef.current) void update.close().catch(() => undefined);
     };
   }, [runCheck]);
 

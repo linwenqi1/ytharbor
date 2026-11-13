@@ -24,7 +24,7 @@ export function Settings({ settings, onSaved, activeDownloadCount, updater }: Se
   const { status } = updater;
   const hasUpdate = status.availableVersion != null;
   const updateBadgeText = status.phase === "downloading"
-    ? `下载中${status.progress == null ? "" : ` ${status.progress}%`}`
+    ? status.reconnecting ? "正在重连" : `下载中${status.progress == null ? "" : ` ${status.progress}%`}`
     : status.phase === "ready" ? "等待安装"
     : status.phase === "installing" ? "正在安装"
     : status.phase === "error" ? "更新失败"
@@ -68,7 +68,7 @@ export function Settings({ settings, onSaved, activeDownloadCount, updater }: Se
             <label>应用版本</label>
             <p>当前版本 v{status.currentVersion}</p>
           </div>
-          {hasUpdate && <button className={`update-badge ${status.phase}`} onClick={() => setShowUpdateDetails((value) => !value)} disabled={status.phase === "downloading" || status.phase === "installing"}><i />{updateBadgeText}</button>}
+          {hasUpdate && <button className={`update-badge ${status.phase}`} onClick={() => setShowUpdateDetails((value) => !value)} disabled={status.phase === "installing"}><i />{updateBadgeText}</button>}
         </div>
         {showUpdateDetails && hasUpdate && (
           <div className="update-panel">
@@ -77,7 +77,7 @@ export function Settings({ settings, onSaved, activeDownloadCount, updater }: Se
               <p className="update-notes">{status.notes || "此版本包含功能改进和问题修复。"}</p>
               <div className="update-panel-actions"><button className="text-button" onClick={() => setShowUpdateDetails(false)}>稍后</button><button className="primary-button update-button" onClick={() => void updater.downloadUpdate()}><Icon name="download" size={16} />下载更新</button></div>
             </>}
-            {status.phase === "downloading" && <div className="update-download"><div><span>正在下载更新…</span><b>{status.progress == null ? "—" : `${status.progress}%`}</b></div><div className="progress"><i className={status.progress == null ? "indeterminate" : ""} style={status.progress == null ? undefined : { width: `${status.progress}%` }} /></div><p>下载期间可以继续使用应用，请不要关闭窗口。</p></div>}
+            {status.phase === "downloading" && <div className="update-download"><div><span>{status.reconnecting ? "网络暂时中断，正在自动重连…" : "正在下载更新…"}</span><b>{status.progress == null ? "—" : `${status.progress}%`}</b></div><div className="progress"><i className={status.progress == null ? "indeterminate" : ""} style={status.progress == null ? undefined : { width: `${status.progress}%` }} /></div><p>已下载的内容会保留；短暂断网会自动续传。</p></div>}
             {status.phase === "ready" && <>
               {activeDownloadCount > 0 ? <div className="update-blocked">还有 {activeDownloadCount} 个下载任务正在进行。为避免任务中断，请等待全部完成后再安装。</div> : <p className="update-confirm">安装时应用会短暂关闭，并在完成后自动重新打开。</p>}
               <div className="update-panel-actions"><button className="text-button" onClick={() => setShowUpdateDetails(false)}>稍后安装</button><button className="primary-button update-button" disabled={activeDownloadCount > 0} onClick={() => void updater.installUpdate()}><Icon name="refresh" size={16} />安装并重启</button></div>
