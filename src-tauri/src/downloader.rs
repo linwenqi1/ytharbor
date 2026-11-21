@@ -374,11 +374,7 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
             .unwrap_or_default()
             .to_string_lossy()
     ));
-    let mut file = match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&partial_path)
-    {
+    let mut file = match open_partial_file(&partial_path) {
         Ok(file) => file,
         Err(error) => {
             finish_task(
@@ -471,6 +467,14 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
         None,
     );
     cleanup(inner, &item.id);
+}
+
+fn open_partial_file(path: &Path) -> std::io::Result<fs::File> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
 }
 
 fn update_native_progress(
@@ -825,11 +829,11 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_successful_output, existing_output_path, native_output_path, validate_request,
-        variant_output_template, OutputTracker,
+        classify_successful_output, existing_output_path, native_output_path, open_partial_file,
+        validate_request, variant_output_template, OutputTracker,
     };
     use crate::models::{DownloadRequest, MediaKind, TaskStatus};
-    use std::fs;
+    use std::{fs, io::Write};
 
     fn request(format_id: &str) -> DownloadRequest {
         DownloadRequest {
@@ -963,6 +967,27 @@ mod tests {
             .expect("completed output should be classified");
 
         assert_eq!(status, TaskStatus::Completed);
+        fs::remove_dir_all(directory).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn overwrites_stale_partial_file_on_retry() {
+        let directory =
+            std::env::temp_dir().join(format!("ytharbor-part-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("test directory should be created");
+        let part_path = directory.join("video.mp4.part");
+        fs::write(&part_path, b"stale partial data").expect("stale part file should be created");
+
+        let mut file =
+            open_partial_file(&part_path).expect("stale part file should be overwritten");
+        file.write_all(b"fresh")
+            .expect("fresh data should be written");
+        drop(file);
+
+        assert_eq!(
+            fs::read(&part_path).expect("part file should be readable"),
+            b"fresh"
+        );
         fs::remove_dir_all(directory).expect("test directory should be removed");
     }
 }
