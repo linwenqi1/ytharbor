@@ -30,10 +30,80 @@ struct OutputTracker {
     existing_paths: Vec<PathBuf>,
 }
 
+#[derive(Default)]
+struct QueueState {
+    tasks: HashMap<String, DownloadTask>,
+    controls: HashMap<String, Arc<AtomicBool>>,
+    running_id: Option<String>,
+}
+
+impl QueueState {
+    fn insert(&mut self, task: DownloadTask) {
+        self.controls
+            .insert(task.id.clone(), Arc::new(AtomicBool::new(false)));
+        self.tasks.insert(task.id.clone(), task);
+    }
+
+    fn cancel(&mut self, id: &str) -> Result<Option<DownloadTask>, String> {
+        let control = self
+            .controls
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "任务不存在或已经结束".to_owned())?;
+        control.store(true, Ordering::Relaxed);
+        if self.running_id.as_deref() == Some(id) {
+            return Ok(None);
+        }
+        self.controls.remove(id);
+        Ok(self.finish(id, TaskStatus::Cancelled, None, None))
+    }
+
+    fn claim_for_run(&mut self, id: &str) -> Option<Arc<AtomicBool>> {
+        let control = self.controls.get(id)?.clone();
+        if control.load(Ordering::Relaxed) {
+            return None;
+        }
+        let still_pending = self
+            .tasks
+            .get(id)
+            .is_some_and(|task| task.status == TaskStatus::Pending);
+        if !still_pending {
+            return None;
+        }
+        self.running_id = Some(id.to_owned());
+        Some(control)
+    }
+
+    fn finish(
+        &mut self,
+        id: &str,
+        status: TaskStatus,
+        output: Option<String>,
+        error: Option<String>,
+    ) -> Option<DownloadTask> {
+        self.controls.remove(id);
+        if self.running_id.as_deref() == Some(id) {
+            self.running_id = None;
+        }
+        let task = self.tasks.get_mut(id)?;
+        if is_terminal_status(&task.status) {
+            return None;
+        }
+        task.status = status;
+        task.output_path = output;
+        task.error = error;
+        task.updated_at = now_ms();
+        if matches!(task.status, TaskStatus::Completed | TaskStatus::Existing) {
+            task.percent = Some(100.0);
+        }
+        task.speed = None;
+        task.eta = None;
+        Some(task.clone())
+    }
+}
+
 struct Inner {
-    tasks: Mutex<HashMap<String, DownloadTask>>,
-    controls: Mutex<HashMap<String, Arc<AtomicBool>>>,
-    running_id: Mutex<Option<String>>,
+    state: Mutex<QueueState>,
 }
 
 pub struct AppState {
@@ -44,9 +114,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(app: AppHandle) -> Self {
         let inner = Arc::new(Inner {
-            tasks: Mutex::new(HashMap::new()),
-            controls: Mutex::new(HashMap::new()),
-            running_id: Mutex::new(None),
+            state: Mutex::new(QueueState::default()),
         });
         let (queue, receiver) = mpsc::channel();
         let worker_inner = Arc::clone(&inner);
@@ -77,17 +145,11 @@ impl AppState {
             created_at: now,
             updated_at: now,
         };
-        let cancel = Arc::new(AtomicBool::new(false));
         self.inner
-            .tasks
+            .state
             .lock()
             .map_err(lock_error)?
-            .insert(id.clone(), task.clone());
-        self.inner
-            .controls
-            .lock()
-            .map_err(lock_error)?
-            .insert(id.clone(), cancel);
+            .insert(task.clone());
         self.queue
             .send(QueuedDownload { id, request })
             .map_err(|_| "下载队列已停止".to_owned())?;
@@ -95,19 +157,15 @@ impl AppState {
     }
 
     pub fn cancel(&self, app: &AppHandle, id: &str) -> Result<(), String> {
-        let control = self
+        let finished = self
             .inner
-            .controls
+            .state
             .lock()
             .map_err(lock_error)?
-            .get(id)
-            .cloned()
-            .ok_or_else(|| "任务不存在或已经结束".to_owned())?;
-        control.store(true, Ordering::Relaxed);
-        let is_running = self.inner.running_id.lock().map_err(lock_error)?.as_deref() == Some(id);
-        if !is_running {
-            finish_task(app, &self.inner, id, TaskStatus::Cancelled, None, None);
-            self.inner.controls.lock().map_err(lock_error)?.remove(id);
+            .cancel(id)?;
+        if let Some(task) = finished {
+            let _ = storage::append_history(app, &task);
+            let _ = app.emit("download://updated", task);
         }
         Ok(())
     }
@@ -115,9 +173,10 @@ impl AppState {
     pub fn tasks(&self) -> Result<Vec<DownloadTask>, String> {
         let mut tasks: Vec<_> = self
             .inner
-            .tasks
+            .state
             .lock()
             .map_err(lock_error)?
+            .tasks
             .values()
             .cloned()
             .collect();
@@ -128,34 +187,32 @@ impl AppState {
 
 fn queue_worker(app: AppHandle, inner: Arc<Inner>, receiver: mpsc::Receiver<QueuedDownload>) {
     while let Ok(item) = receiver.recv() {
-        let cancelled = inner
-            .controls
+        let Some(cancel) = inner
+            .state
             .lock()
             .ok()
-            .and_then(|items| items.get(&item.id).cloned())
-            .is_none_or(|flag| flag.load(Ordering::Relaxed));
-        let still_pending = inner
-            .tasks
-            .lock()
-            .ok()
-            .and_then(|tasks| tasks.get(&item.id).cloned())
-            .is_some_and(|task| task.status == TaskStatus::Pending);
-        if cancelled || !still_pending {
+            .and_then(|mut state| state.claim_for_run(&item.id))
+        else {
             continue;
-        }
-        if let Ok(mut running) = inner.running_id.lock() {
-            *running = Some(item.id.clone());
-        }
-        run_download(&app, &inner, item);
-        if let Ok(mut running) = inner.running_id.lock() {
-            *running = None;
+        };
+        let id = item.id.clone();
+        run_download(&app, &inner, item, cancel);
+        if let Ok(mut state) = inner.state.lock() {
+            state.controls.remove(&id);
+            if state.running_id.as_deref() == Some(id.as_str()) {
+                state.running_id = None;
+            }
         }
     }
 }
 
-fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
+fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload, cancel: Arc<AtomicBool>) {
+    if cancel.load(Ordering::Relaxed) {
+        finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
+        return;
+    }
     if metadata::is_douyin_url(&item.request.url) {
-        run_douyin_download(app, inner, item);
+        run_douyin_download(app, inner, item, cancel);
         return;
     }
     update_task(app, inner, &item.id, |task| {
@@ -214,6 +271,11 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
     }
     args.extend(["--".to_owned(), item.request.url.clone()]);
 
+    if cancel.load(Ordering::Relaxed) {
+        finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
+        return;
+    }
+
     let spawned = metadata::yt_dlp_command(app)
         .args(&args)
         .stdout(Stdio::piped())
@@ -222,15 +284,18 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
-            finish_task(
-                app,
-                inner,
-                &item.id,
-                TaskStatus::Failed,
-                None,
-                Some(format!("无法启动 yt-dlp：{error}")),
-            );
-            cleanup(inner, &item.id);
+            if cancel.load(Ordering::Relaxed) {
+                finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
+            } else {
+                finish_task(
+                    app,
+                    inner,
+                    &item.id,
+                    TaskStatus::Failed,
+                    None,
+                    Some(format!("无法启动 yt-dlp：{error}")),
+                );
+            }
             return;
         }
     };
@@ -243,12 +308,6 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
         .stderr
         .take()
         .map(|stderr| spawn_reader(stderr, line_tx));
-    let cancel = inner
-        .controls
-        .lock()
-        .ok()
-        .and_then(|items| items.get(&item.id).cloned())
-        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let mut recent = VecDeque::<String>::with_capacity(24);
     let mut output = OutputTracker::default();
 
@@ -264,7 +323,6 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
             drop(out_thread.take());
             drop(err_thread.take());
             finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
-            cleanup(inner, &item.id);
             return;
         }
         match line_rx.recv_timeout(Duration::from_millis(120)) {
@@ -284,7 +342,6 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
                     None,
                     Some(format!("下载进程异常：{error}")),
                 );
-                cleanup(inner, &item.id);
                 return;
             }
         }
@@ -303,6 +360,8 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
             Ok((status, path)) => finish_task(app, inner, &item.id, status, path, None),
             Err(error) => finish_task(app, inner, &item.id, TaskStatus::Failed, None, Some(error)),
         }
+    } else if cancel.load(Ordering::Relaxed) {
+        finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
     } else {
         let message = recent
             .iter()
@@ -320,10 +379,18 @@ fn run_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
             Some(message.trim_start_matches("ERROR:").trim().to_owned()),
         );
     }
-    cleanup(inner, &item.id);
 }
 
-fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload) {
+fn run_douyin_download(
+    app: &AppHandle,
+    inner: &Arc<Inner>,
+    item: QueuedDownload,
+    cancel: Arc<AtomicBool>,
+) {
+    if cancel.load(Ordering::Relaxed) {
+        finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
+        return;
+    }
     if item.request.kind == crate::models::MediaKind::Audio {
         finish_task(
             app,
@@ -333,7 +400,6 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
             None,
             Some("抖音原生下载暂仅支持视频；音频提取将在后续版本支持".to_owned()),
         );
-        cleanup(inner, &item.id);
         return;
     }
     update_task(app, inner, &item.id, |task| {
@@ -345,11 +411,18 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
     let download = match douyin::open_download(&item.request.url, &item.request.format_id) {
         Ok(download) => download,
         Err(error) => {
-            finish_task(app, inner, &item.id, TaskStatus::Failed, None, Some(error));
-            cleanup(inner, &item.id);
+            if cancel.load(Ordering::Relaxed) {
+                finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
+            } else {
+                finish_task(app, inner, &item.id, TaskStatus::Failed, None, Some(error));
+            }
             return;
         }
     };
+    if cancel.load(Ordering::Relaxed) {
+        finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
+        return;
+    }
     let template = storage::load_settings(app)
         .map(|value| value.filename_template)
         .unwrap_or_else(|_| "%(title)s [%(id)s].%(ext)s".to_owned());
@@ -364,7 +437,6 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
             Some(output_path.to_string_lossy().to_string()),
             None,
         );
-        cleanup(inner, &item.id);
         return;
     }
     let partial_path = output_path.with_file_name(format!(
@@ -385,16 +457,9 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
                 None,
                 Some(format!("无法创建下载文件：{error}")),
             );
-            cleanup(inner, &item.id);
             return;
         }
     };
-    let cancel = inner
-        .controls
-        .lock()
-        .ok()
-        .and_then(|items| items.get(&item.id).cloned())
-        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let total = download.total_bytes;
     let started = Instant::now();
     let mut last_update = Instant::now() - Duration::from_secs(1);
@@ -419,14 +484,12 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
         } else {
             finish_task(app, inner, &item.id, TaskStatus::Failed, None, Some(error));
         }
-        cleanup(inner, &item.id);
         return;
     }
     if cancel.load(Ordering::Relaxed) {
         drop(file);
         let _ = fs::remove_file(&partial_path);
         finish_task(app, inner, &item.id, TaskStatus::Cancelled, None, None);
-        cleanup(inner, &item.id);
         return;
     }
     if let Err(error) = file.flush() {
@@ -440,7 +503,6 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
             None,
             Some(format!("无法完成抖音下载：{error}")),
         );
-        cleanup(inner, &item.id);
         return;
     }
     drop(file);
@@ -454,7 +516,6 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
             None,
             Some(format!("无法完成抖音下载：{error}")),
         );
-        cleanup(inner, &item.id);
         return;
     }
     update_native_progress(app, inner, &item.id, written, total, started.elapsed());
@@ -466,7 +527,6 @@ fn run_douyin_download(app: &AppHandle, inner: &Arc<Inner>, item: QueuedDownload
         Some(output_path.to_string_lossy().to_string()),
         None,
     );
-    cleanup(inner, &item.id);
 }
 
 fn open_partial_file(path: &Path) -> std::io::Result<fs::File> {
@@ -747,14 +807,24 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
     })
 }
 
+fn is_terminal_status(status: &TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Completed | TaskStatus::Existing | TaskStatus::Failed | TaskStatus::Cancelled
+    )
+}
+
 fn update_task<F: FnOnce(&mut DownloadTask)>(
     app: &AppHandle,
     inner: &Arc<Inner>,
     id: &str,
     change: F,
 ) {
-    let task = inner.tasks.lock().ok().and_then(|mut tasks| {
-        let task = tasks.get_mut(id)?;
+    let task = inner.state.lock().ok().and_then(|mut state| {
+        let task = state.tasks.get_mut(id)?;
+        if is_terminal_status(&task.status) {
+            return None;
+        }
         change(task);
         task.updated_at = now_ms();
         Some(task.clone())
@@ -772,28 +842,14 @@ fn finish_task(
     output: Option<String>,
     error: Option<String>,
 ) {
-    let task = inner.tasks.lock().ok().and_then(|mut tasks| {
-        let task = tasks.get_mut(id)?;
-        task.status = status;
-        task.output_path = output;
-        task.error = error;
-        task.updated_at = now_ms();
-        if matches!(task.status, TaskStatus::Completed | TaskStatus::Existing) {
-            task.percent = Some(100.0);
-        }
-        task.speed = None;
-        task.eta = None;
-        Some(task.clone())
-    });
+    let task = inner
+        .state
+        .lock()
+        .ok()
+        .and_then(|mut state| state.finish(id, status, output, error));
     if let Some(task) = task {
         let _ = storage::append_history(app, &task);
         let _ = app.emit("download://updated", task);
-    }
-}
-
-fn cleanup(inner: &Arc<Inner>, id: &str) {
-    if let Ok(mut controls) = inner.controls.lock() {
-        controls.remove(id);
     }
 }
 
@@ -830,10 +886,29 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> String {
 mod tests {
     use super::{
         classify_successful_output, existing_output_path, native_output_path, open_partial_file,
-        validate_request, variant_output_template, OutputTracker,
+        validate_request, variant_output_template, OutputTracker, QueueState,
     };
-    use crate::models::{DownloadRequest, MediaKind, TaskStatus};
-    use std::{fs, io::Write};
+    use crate::models::{DownloadRequest, DownloadTask, MediaKind, TaskStatus};
+    use std::{fs, io::Write, sync::atomic::Ordering};
+
+    fn task(id: &str) -> DownloadTask {
+        DownloadTask {
+            id: id.to_owned(),
+            url: "https://www.douyin.com/video/7699483289760959786".to_owned(),
+            title: "test".to_owned(),
+            thumbnail: None,
+            format_label: "1080p".to_owned(),
+            kind: MediaKind::Video,
+            status: TaskStatus::Pending,
+            percent: None,
+            speed: None,
+            eta: None,
+            output_path: None,
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
 
     fn request(format_id: &str) -> DownloadRequest {
         DownloadRequest {
@@ -989,5 +1064,69 @@ mod tests {
             b"fresh"
         );
         fs::remove_dir_all(directory).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn cancelling_pending_task_prevents_worker_from_claiming_it() {
+        let mut state = QueueState::default();
+        state.insert(task("task-1"));
+
+        let cancelled = state
+            .cancel("task-1")
+            .expect("pending task cancel should succeed")
+            .expect("pending cancel should transition immediately");
+
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+        assert!(state.claim_for_run("task-1").is_none());
+        assert!(state.cancel("task-1").is_err());
+    }
+
+    #[test]
+    fn cancelling_claimed_task_signals_worker_and_preserves_control_until_finish() {
+        let mut state = QueueState::default();
+        state.insert(task("task-2"));
+
+        let cancel_flag = state
+            .claim_for_run("task-2")
+            .expect("pending task should be claimable");
+        assert!(!cancel_flag.load(Ordering::Relaxed));
+
+        let immediate = state
+            .cancel("task-2")
+            .expect("running task cancel should succeed");
+        assert!(immediate.is_none());
+        assert!(cancel_flag.load(Ordering::Relaxed));
+
+        let finished = state
+            .finish("task-2", TaskStatus::Cancelled, None, None)
+            .expect("running task should transition on finish");
+        assert_eq!(finished.status, TaskStatus::Cancelled);
+        assert!(state.running_id.is_none());
+        assert!(state.controls.is_empty());
+    }
+
+    #[test]
+    fn cancelling_after_finish_is_rejected_and_preserves_completed_status() {
+        let mut state = QueueState::default();
+        state.insert(task("task-3"));
+        let _ = state.claim_for_run("task-3").expect("task should claim");
+
+        let completed = state
+            .finish(
+                "task-3",
+                TaskStatus::Completed,
+                Some("C:\\Downloads\\out.mp4".to_owned()),
+                None,
+            )
+            .expect("task should finish as completed");
+        assert_eq!(completed.status, TaskStatus::Completed);
+        assert!(state.cancel("task-3").is_err());
+        assert!(state
+            .finish("task-3", TaskStatus::Cancelled, None, None)
+            .is_none());
+        assert_eq!(
+            state.tasks.get("task-3").expect("task should remain").status,
+            TaskStatus::Completed
+        );
     }
 }
