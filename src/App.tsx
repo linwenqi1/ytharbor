@@ -3,7 +3,7 @@ import { NoticeViewport, type Notice } from "./components/NoticeToast";
 import { Sidebar } from "./components/Sidebar";
 import { useDownloads } from "./hooks/useDownloads";
 import { useUpdater } from "./hooks/useUpdater";
-import { getSettings, revealDownload } from "./lib/tauri";
+import { getSettings, openExternalUrl, revealDownload } from "./lib/tauri";
 import { Home } from "./pages/Home";
 import { Downloads } from "./pages/Downloads";
 import { History } from "./pages/History";
@@ -30,6 +30,13 @@ export default function App() {
       pushNotice({ title: "无法打开文件位置", message: "文件可能已被移动或删除。", tone: "error" });
     }
   }, [pushNotice]);
+  const openTaskUrl = useCallback(async (task: DownloadTask) => {
+    try {
+      await openExternalUrl(task.url);
+    } catch {
+      pushNotice({ title: "无法打开原链接", message: "链接无效或无法启动系统浏览器。", tone: "error" });
+    }
+  }, [pushNotice]);
   const handleCompleted = useCallback((task: DownloadTask) => {
     pushNotice({ title: "下载完成", message: task.title, actionLabel: "查看文件", action: () => revealTask(task) });
   }, [pushNotice, revealTask]);
@@ -45,8 +52,8 @@ export default function App() {
       <Sidebar page={page} onChange={setPage} activeCount={activeCount} />
       <main>
         {page === "download" && <Home settings={settings} onStart={start} onTaskCreated={() => setPage("tasks")} />}
-        {page === "tasks" && <Downloads tasks={tasks} onCancel={cancel} onReveal={revealTask} />}
-        {page === "history" && <History refreshKey={historyKey} onReveal={revealTask} />}
+        {page === "tasks" && <Downloads tasks={tasks} onCancel={cancel} onReveal={revealTask} onOpenUrl={openTaskUrl} />}
+        {page === "history" && <History refreshKey={historyKey} onReveal={revealTask} onOpenUrl={openTaskUrl} />}
         {page === "settings" && <Settings settings={settings} onSaved={setSettings} activeDownloadCount={activeCount} updater={updater} />}
       </main>
       <NoticeViewport notices={notices} onDismiss={dismissNotice} />

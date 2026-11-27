@@ -1,5 +1,5 @@
 interface IconProps {
-  name: "anchor" | "download" | "queue" | "history" | "settings" | "search" | "close" | "check" | "folder" | "music" | "video" | "trash" | "refresh";
+  name: "anchor" | "download" | "queue" | "history" | "settings" | "search" | "close" | "check" | "folder" | "link" | "music" | "video" | "trash" | "refresh";
   size?: number;
 }
 
@@ -13,6 +13,7 @@ const paths: Record<IconProps["name"], React.ReactNode> = {
   close: <path d="m6 6 12 12M18 6 6 18"/>,
   check: <path d="m5 12 4 4L19 6"/>,
   folder: <path d="M3 6h7l2 2h9v11H3Z"/>,
+  link: <><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></>,
   music: <><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></>,
   video: <><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2"/></>,
   trash: <><path d="M4 7h16M9 3h6l1 4H8l1-4Zm-3 4 1 14h10l1-14M10 11v6m4-6v6"/></>,

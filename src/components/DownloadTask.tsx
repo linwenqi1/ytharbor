@@ -1,3 +1,4 @@
+import { isHttpUrl } from "../lib/tauri";
 import type { DownloadTask as Task } from "../types";
 import { Icon } from "./Icon";
 
@@ -10,13 +11,15 @@ function speed(bytes: number | null) {
   return bytes > 1024 ** 2 ? `${(bytes / 1024 ** 2).toFixed(1)} MB/s` : `${(bytes / 1024).toFixed(0)} KB/s`;
 }
 
-export function DownloadTask({ task, onCancel, onReveal }: {
+export function DownloadTask({ task, onCancel, onReveal, onOpenUrl }: {
   task: Task;
   onCancel?: (id: string) => void;
   onReveal?: (task: Task) => void;
+  onOpenUrl?: (task: Task) => void;
 }) {
   const active = ["pending", "downloading", "processing"].includes(task.status);
   const revealable = ["completed", "existing"].includes(task.status) && Boolean(task.outputPath) && Boolean(onReveal);
+  const linkable = Boolean(onOpenUrl) && isHttpUrl(task.url);
   const detail = task.status === "downloading"
     ? [speed(task.speed), task.eta != null ? `剩余 ${task.eta} 秒` : null].filter(Boolean).join(" · ")
     : task.status === "processing" ? "正在合并或转换媒体文件…"
@@ -34,8 +37,9 @@ export function DownloadTask({ task, onCancel, onReveal }: {
         {active && <div className="progress-row"><div className="progress"><i style={{ width: `${task.percent ?? (task.status === "processing" ? 100 : 2)}%` }} className={task.status === "processing" ? "indeterminate" : ""} /></div><b>{task.percent == null ? "—" : `${Math.round(task.percent)}%`}</b></div>}
       </div>
       <div className="task-actions">
-        {revealable && <button className="task-file-button" onClick={() => onReveal?.(task)}><Icon name="folder" size={15} />打开所在位置</button>}
-        {active && onCancel && <button className="text-button danger" onClick={() => onCancel(task.id)}>取消</button>}
+        {revealable && <button type="button" className="task-icon-button" title="打开所在位置" aria-label="打开所在位置" onClick={() => onReveal?.(task)}><Icon name="folder" size={15} /></button>}
+        {active && onCancel && <button type="button" className="text-button danger" onClick={() => onCancel(task.id)}>取消</button>}
+        {linkable && <button type="button" className="task-icon-button" title="打开原视频链接" aria-label="打开原视频链接" onClick={() => onOpenUrl?.(task)}><Icon name="link" size={15} /></button>}
       </div>
     </article>
   );

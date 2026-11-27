@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { AppSettings, DownloadRequest, DownloadTask, VideoMetadata } from "../types";
 
 export const parseVideo = (url: string) => invoke<VideoMetadata>("parse_video", { url });
@@ -13,6 +13,21 @@ export const clearHistory = () => invoke<void>("clear_history");
 export const getSettings = () => invoke<AppSettings>("get_settings");
 export const saveSettings = (settings: AppSettings) => invoke<AppSettings>("save_settings", { settings });
 export const revealDownload = (path: string) => revealItemInDir(path);
+
+/** Checks whether a string is a valid HTTP or HTTPS URL safe to open externally. */
+export function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export const openExternalUrl = (url: string) => {
+  if (!isHttpUrl(url)) return Promise.reject(new Error("仅支持打开 http/https 链接"));
+  return openUrl(url);
+};
 
 export const onTaskUpdated = (handler: (task: DownloadTask) => void): Promise<UnlistenFn> =>
   listen<DownloadTask>("download://updated", (event) => handler(event.payload));
