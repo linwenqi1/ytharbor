@@ -428,13 +428,15 @@ fn run_douyin_download(
         .unwrap_or_else(|_| "%(title)s [%(id)s].%(ext)s".to_owned());
     let template = variant_output_template(&template, &item.request);
     let output_path = native_output_path(&item.request, &template, &download.id);
-    if output_path.is_file() {
+    if let Some(existing_path) =
+        find_existing_native_output(&item.request, &output_path, &download.id)
+    {
         finish_task(
             app,
             inner,
             &item.id,
             TaskStatus::Existing,
-            Some(output_path.to_string_lossy().to_string()),
+            Some(existing_path.to_string_lossy().to_string()),
             None,
         );
         return;
@@ -560,29 +562,154 @@ fn update_native_progress(
     });
 }
 
+const PART_SUFFIX_LEN: usize = ".part".len();
+const MAX_FILENAME_BYTES: usize = 255 - PART_SUFFIX_LEN;
+const MAX_FILENAME_UTF16: usize = 255 - PART_SUFFIX_LEN;
+const WINDOWS_MAX_PATH_UTF16: usize = 259;
+
 fn native_output_path(request: &DownloadRequest, template: &str, video_id: &str) -> PathBuf {
-    let rendered = template
-        .replace("%(title)s", &request.title)
+    let base_template = template
         .replace("%(id)s", video_id)
         .replace("%(ext)s", "mp4");
     // Existing yt-dlp templates can contain many advanced tokens. Native
     // resolvers intentionally support the documented core fields; fall back to
     // a predictable filename if an unsupported token remains.
-    let filename = if rendered.contains("%(") {
-        format!(
-            "{} [{}] [{}].mp4",
-            request.title,
-            video_id,
-            download_variant(request)
-        )
+    let effective_template = if base_template.replace("%(title)s", "").contains("%(") {
+        format!("%(title)s [{video_id}] [{}].mp4", download_variant(request))
     } else {
-        rendered
+        base_template
     };
-    Path::new(&request.output_directory).join(sanitize_filename(&filename))
+
+    let mut filename = sanitize_filename(&effective_template.replace("%(title)s", &request.title));
+    let full_path = Path::new(&request.output_directory).join(&filename);
+    let (max_bytes, max_utf16) = filename_limits(&request.output_directory);
+    if fits_filename_limits(&filename, max_bytes, max_utf16) || full_path.is_file() {
+        return full_path;
+    }
+
+    if effective_template.contains("%(title)s") {
+        let clean_title = clean_filename_chars(&request.title);
+        let without_title = sanitize_filename(&effective_template.replace("%(title)s", ""));
+        let occurrences = effective_template.matches("%(title)s").count().max(1);
+        let overhead_bytes = without_title.len() + occurrences;
+        let overhead_utf16 = without_title.encode_utf16().count() + occurrences;
+        let title_max_bytes = max_bytes.saturating_sub(overhead_bytes) / occurrences;
+        let title_max_utf16 = max_utf16.saturating_sub(overhead_utf16) / occurrences;
+        let short_title = truncate_to_limits(&clean_title, title_max_bytes, title_max_utf16);
+        filename = sanitize_filename(&effective_template.replace("%(title)s", &short_title));
+    }
+
+    let (component_bytes, component_utf16) = component_limits();
+    filename = clamp_component_length(&filename, component_bytes, component_utf16);
+    Path::new(&request.output_directory).join(filename)
 }
 
-fn sanitize_filename(value: &str) -> String {
-    let mut clean: String = value
+fn find_existing_native_output(
+    request: &DownloadRequest,
+    output_path: &Path,
+    video_id: &str,
+) -> Option<PathBuf> {
+    if output_path.is_file() {
+        return Some(output_path.to_path_buf());
+    }
+    if video_id.is_empty() {
+        return None;
+    }
+    let suffix = format!("[{video_id}] [{}].mp4", download_variant(request));
+    let expected_name = output_path.file_name()?.to_string_lossy();
+    if !ends_with_filename_suffix(&expected_name, &suffix) {
+        return None;
+    }
+    let entries = fs::read_dir(&request.output_directory).ok()?;
+    let mut matches: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .is_some_and(|name| ends_with_filename_suffix(&name.to_string_lossy(), &suffix))
+        })
+        .collect();
+    matches.sort();
+    matches.into_iter().next()
+}
+
+fn ends_with_filename_suffix(name: &str, suffix: &str) -> bool {
+    if cfg!(windows) {
+        name.to_ascii_lowercase()
+            .ends_with(&suffix.to_ascii_lowercase())
+    } else {
+        name.ends_with(suffix)
+    }
+}
+
+fn component_limits() -> (usize, usize) {
+    if cfg!(windows) {
+        (usize::MAX, MAX_FILENAME_UTF16)
+    } else {
+        (MAX_FILENAME_BYTES, usize::MAX)
+    }
+}
+
+fn filename_limits(directory: &str) -> (usize, usize) {
+    if cfg!(windows) {
+        let dir_utf16 = directory
+            .trim_end_matches(['\\', '/'])
+            .encode_utf16()
+            .count();
+        let max_utf16 = WINDOWS_MAX_PATH_UTF16
+            .saturating_sub(dir_utf16 + 1 + PART_SUFFIX_LEN)
+            .min(MAX_FILENAME_UTF16);
+        (usize::MAX, max_utf16)
+    } else {
+        (MAX_FILENAME_BYTES, usize::MAX)
+    }
+}
+
+fn fits_filename_limits(filename: &str, max_bytes: usize, max_utf16: usize) -> bool {
+    filename.len() <= max_bytes && filename.encode_utf16().count() <= max_utf16
+}
+
+fn truncate_to_limits(value: &str, max_bytes: usize, max_utf16: usize) -> String {
+    let mut out = String::new();
+    let mut bytes = 0;
+    let mut utf16 = 0;
+    for ch in value.chars() {
+        let ch_bytes = ch.len_utf8();
+        let ch_utf16 = ch.len_utf16();
+        if ch_bytes > max_bytes.saturating_sub(bytes)
+            || ch_utf16 > max_utf16.saturating_sub(utf16)
+        {
+            break;
+        }
+        out.push(ch);
+        bytes += ch_bytes;
+        utf16 += ch_utf16;
+    }
+    out.trim_end_matches([' ', '.']).to_owned()
+}
+
+fn clamp_component_length(filename: &str, max_bytes: usize, max_utf16: usize) -> String {
+    if filename.len() <= max_bytes && filename.encode_utf16().count() <= max_utf16 {
+        return filename.to_owned();
+    }
+    let (stem, ext) = match filename.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => (stem, format!(".{ext}")),
+        _ => (filename, String::new()),
+    };
+    let stem_max_bytes = max_bytes.saturating_sub(ext.len());
+    let stem_max_utf16 = max_utf16.saturating_sub(ext.encode_utf16().count());
+    let short_stem = truncate_to_limits(stem, stem_max_bytes, stem_max_utf16);
+    if short_stem.is_empty() {
+        format!("douyin-video{ext}")
+    } else {
+        sanitize_filename(&format!("{short_stem}{ext}"))
+    }
+}
+
+fn clean_filename_chars(value: &str) -> String {
+    let clean: String = value
         .chars()
         .map(|character| {
             if character.is_control()
@@ -597,8 +724,16 @@ fn sanitize_filename(value: &str) -> String {
             }
         })
         .collect();
-    clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
-    clean = clean.trim_matches([' ', '.']).to_owned();
+    clean
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches([' ', '.'])
+        .to_owned()
+}
+
+fn sanitize_filename(value: &str) -> String {
+    let mut clean = clean_filename_chars(value);
     if clean.is_empty() {
         clean = "douyin-video.mp4".to_owned();
     }
@@ -885,8 +1020,9 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_successful_output, existing_output_path, native_output_path, open_partial_file,
-        validate_request, variant_output_template, OutputTracker, QueueState,
+        classify_successful_output, existing_output_path, find_existing_native_output,
+        native_output_path, open_partial_file, validate_request, variant_output_template,
+        OutputTracker, QueueState,
     };
     use crate::models::{DownloadRequest, DownloadTask, MediaKind, TaskStatus};
     use std::{fs, io::Write, sync::atomic::Ordering};
@@ -1128,5 +1264,163 @@ mod tests {
             state.tasks.get("task-3").expect("task should remain").status,
             TaskStatus::Completed
         );
+    }
+
+    #[test]
+    fn truncates_long_douyin_titles_while_preserving_id_quality_and_extension() {
+        let long_title = "超长抖音文案测试🎉#话题标签 ".repeat(30);
+        let mut low = request("douyin:720p");
+        low.title = long_title.clone();
+        low.format_label = "720p".to_owned();
+        let mut high = request("douyin:1080p");
+        high.title = long_title;
+        high.format_label = "1080p".to_owned();
+        let base_template = "%(title)s [%(id)s] [%(quality)s].%(ext)s";
+
+        let low_path = native_output_path(
+            &low,
+            &variant_output_template(base_template, &low),
+            "7699483289760959786",
+        );
+        let high_path = native_output_path(
+            &high,
+            &variant_output_template(base_template, &high),
+            "7699483289760959786",
+        );
+
+        let low_name = low_path
+            .file_name()
+            .expect("low filename should exist")
+            .to_string_lossy();
+        let high_name = high_path
+            .file_name()
+            .expect("high filename should exist")
+            .to_string_lossy();
+
+        assert_ne!(low_path, high_path);
+        if cfg!(windows) {
+            assert!(low_name.encode_utf16().count() + ".part".len() <= 255);
+            assert!(high_name.encode_utf16().count() + ".part".len() <= 255);
+        } else {
+            assert!(low_name.len() + ".part".len() <= 255);
+            assert!(high_name.len() + ".part".len() <= 255);
+        }
+        assert!(low_name.ends_with("[7699483289760959786] [720p].mp4"));
+        assert!(high_name.ends_with("[7699483289760959786] [1080p].mp4"));
+    }
+
+    #[test]
+    fn preserves_legacy_filename_for_titles_with_dots_and_medium_chinese_length() {
+        let mut req = request("douyin:1080p");
+        // 90 Chinese chars (> 255 UTF-8 bytes) ending with "..." — valid on Windows NTFS
+        // and must keep the exact pre-truncation filename for existing-file detection.
+        req.title = format!("{}...", "抖音中文标题测试字符".repeat(9));
+        req.format_label = "1080p".to_owned();
+        let template = variant_output_template("%(title)s [%(id)s] [%(quality)s].%(ext)s", &req);
+
+        let path = native_output_path(&req, &template, "7699483289760959786");
+        let name = path
+            .file_name()
+            .expect("filename should exist")
+            .to_string_lossy();
+
+        if cfg!(windows) {
+            assert_eq!(
+                name,
+                format!("{} [7699483289760959786] [1080p].mp4", req.title)
+            );
+        } else {
+            assert!(name.len() + ".part".len() <= 255);
+            assert!(name.ends_with("[7699483289760959786] [1080p].mp4"));
+        }
+    }
+
+    #[test]
+    fn fits_long_douyin_filename_in_deep_directory_and_creates_file() {
+        let base = std::env::temp_dir().join(format!("ytharbor-long-{}", uuid::Uuid::new_v4()));
+        let deep = base
+            .join("nested-downloads-directory-segment-one")
+            .join("nested-downloads-directory-segment-two")
+            .join("nested-downloads-directory-segment-three");
+        fs::create_dir_all(&deep).expect("deep directory should be created");
+
+        let mut req = request("douyin:1080p");
+        req.output_directory = deep.to_string_lossy().to_string();
+        req.title = "这是一段非常非常长的抖音视频标题包含很多话题标签".repeat(12);
+        req.format_label = "1080p".to_owned();
+        let template = variant_output_template("%(title)s [%(id)s] [%(quality)s].%(ext)s", &req);
+
+        let output_path = native_output_path(&req, &template, "7699483289760959786");
+        let partial_path = output_path.with_file_name(format!(
+            "{}.part",
+            output_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        ));
+
+        if cfg!(windows) {
+            assert!(
+                partial_path.to_string_lossy().encode_utf16().count() <= 259,
+                "partial path should fit Windows MAX_PATH: {}",
+                partial_path.display()
+            );
+        }
+        assert!(output_path
+            .file_name()
+            .expect("filename should exist")
+            .to_string_lossy()
+            .ends_with("[7699483289760959786] [1080p].mp4"));
+
+        let mut file =
+            open_partial_file(&partial_path).expect("partial file should be creatable on disk");
+        file.write_all(b"mp4-data")
+            .expect("partial file should be writable");
+        drop(file);
+        fs::rename(&partial_path, &output_path).expect("partial file should rename to final path");
+        assert!(output_path.is_file());
+
+        fs::remove_dir_all(base).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn finds_existing_douyin_file_by_id_and_quality_suffix_when_title_differs() {
+        let directory = std::env::temp_dir().join(format!(
+            "ytharbor-douyin-existing-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).expect("test directory should be created");
+
+        let existing_1080 = directory.join("旧标题截断版本 [7699483289760959786] [1080p].mp4");
+        let existing_720 = directory.join("旧标题截断版本 [7699483289760959786] [720p].mp4");
+        let stale_part = directory.join("新标题完整版本 [7699483289760959786] [1440p].mp4.part");
+        fs::write(&existing_1080, b"video").expect("1080p file should be created");
+        fs::write(&existing_720, b"video").expect("720p file should be created");
+        fs::write(&stale_part, b"part").expect("part file should be created");
+
+        let mut req = request("douyin:1080p");
+        req.output_directory = directory.to_string_lossy().to_string();
+        req.title = "完全不同的新标题".to_owned();
+        req.format_label = "1080p".to_owned();
+        let template = variant_output_template("%(title)s [%(id)s] [%(quality)s].%(ext)s", &req);
+        let expected_path = native_output_path(&req, &template, "7699483289760959786");
+
+        assert_eq!(
+            find_existing_native_output(&req, &expected_path, "7699483289760959786"),
+            Some(existing_1080)
+        );
+
+        let mut req_1440 = req.clone();
+        req_1440.format_id = "douyin:1440p".to_owned();
+        req_1440.format_label = "1440p".to_owned();
+        let template_1440 =
+            variant_output_template("%(title)s [%(id)s] [%(quality)s].%(ext)s", &req_1440);
+        let expected_1440 = native_output_path(&req_1440, &template_1440, "7699483289760959786");
+        assert_eq!(
+            find_existing_native_output(&req_1440, &expected_1440, "7699483289760959786"),
+            None
+        );
+
+        fs::remove_dir_all(directory).expect("test directory should be removed");
     }
 }
